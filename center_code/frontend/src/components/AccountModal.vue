@@ -1,4 +1,5 @@
 <template>
+  <div>
   <el-dialog
     v-model="dialogVisible"
     title="账号管理"
@@ -49,6 +50,10 @@
           <el-form-item label="平台">
             <el-select v-model="form.platform" placeholder="请选择平台">
               <el-option label="抖音" value="douyin" />
+              <el-option label="快手" value="kuaishou" />
+              <el-option label="小红书" value="xiaohongshu" />
+              <el-option label="微信视频号" value="weixin" />
+              <el-option label="TikTok" value="tiktok" />
             </el-select>
           </el-form-item>
           <el-form-item>
@@ -86,7 +91,7 @@
         <span v-else-if="loginStatus === 'scanning'">已扫描，等待用户确认登录...</span>
       </p>
       <p style="margin-top: 10px; color: #999; font-size: 14px;">
-        请使用抖音APP扫描浏览器中的二维码完成登录
+        {{ currentLoginAccount?.platform === 'xiaohongshu' ? '请使用小红书APP扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'weixin' ? '请使用微信扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'tiktok' ? '请在浏览器中完成 TikTok 登录（邮箱/手机/第三方）' : '请使用抖音APP扫描浏览器中的二维码完成登录' }}
       </p>
     </div>
     
@@ -106,6 +111,7 @@
       <el-button @click="cancelLogin" :disabled="loginStatus === 'logged_in'">取消</el-button>
     </template>
   </el-dialog>
+  </div>
 </template>
 
 <script setup>
@@ -146,7 +152,9 @@ const getPlatformText = (platform) => {
   const map = {
     'douyin': '抖音',
     'kuaishou': '快手',
-    'xiaohongshu': '小红书'
+    'xiaohongshu': '小红书',
+    'weixin': '微信视频号',
+    'tiktok': 'TikTok'
   }
   return map[platform] || platform
 }

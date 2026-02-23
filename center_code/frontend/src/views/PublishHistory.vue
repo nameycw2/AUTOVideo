@@ -165,6 +165,8 @@ const getPlatformText = (platform) => {
     'douyin': '抖音',
     'kuaishou': '快手',
     'xiaohongshu': '小红书',
+    'weixin': '微信视频号',
+    'tiktok': 'TikTok',
     'bilibili': 'B站'
   }
   return platformMap[platform] || platform

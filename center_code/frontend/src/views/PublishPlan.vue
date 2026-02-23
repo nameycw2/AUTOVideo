@@ -17,6 +17,8 @@
           <el-option label="抖音" value="douyin" />
           <el-option label="快手" value="kuaishou" />
           <el-option label="小红书" value="xiaohongshu" />
+          <el-option label="微信视频号" value="weixin" />
+          <el-option label="TikTok" value="tiktok" />
         </el-select>
         <el-select v-model="filters.status" placeholder="选择状态" clearable style="width: 150px; margin-right: 10px;">
           <el-option label="待发布" value="pending" />
@@ -103,6 +105,8 @@
             <el-option label="抖音" value="douyin" />
             <el-option label="快手" value="kuaishou" />
             <el-option label="小红书" value="xiaohongshu" />
+            <el-option label="微信视频号" value="weixin" />
+            <el-option label="TikTok" value="tiktok" />
           </el-select>
         </el-form-item>
         <el-form-item label="关联商家">
@@ -161,7 +165,7 @@
               <el-button type="primary" link @click="addPhaseItem" style="margin-bottom: 8px;">添加阶段</el-button>
               <el-table :data="phasedItems" size="small" style="width: 100%;" v-loading="videoLoading">
                 <el-table-column label="视频" min-width="220">
-                  <template #default="{ row, $index }">
+                  <template #default="{ row }">
                     <el-select v-model="row.video_id" placeholder="选择视频" filterable style="width: 100%;" @visible-change="onVideoDropdownOpened">
                       <el-option
                         v-for="video in videoLibrary"
@@ -282,7 +286,9 @@ const getPlatformText = (platform) => {
   const map = {
     'douyin': '抖音',
     'kuaishou': '快手',
-    'xiaohongshu': '小红书'
+    'xiaohongshu': '小红书',
+    'weixin': '微信视频号',
+    'tiktok': 'TikTok'
   }
   return map[platform] || platform
 }

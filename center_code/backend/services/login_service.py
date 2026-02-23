@@ -82,6 +82,12 @@ async def start_login_session(account_id: int, platform: str = 'douyin') -> Dict
         # 根据平台选择登录URL
         if platform == 'douyin':
             login_url = 'https://creator.douyin.com/'
+        elif platform == 'xiaohongshu':
+            login_url = 'https://creator.xiaohongshu.com/login'
+        elif platform == 'weixin':
+            login_url = 'https://channels.weixin.qq.com/login.html'
+        elif platform == 'tiktok':
+            login_url = 'https://www.tiktok.com/upload'
         else:
             login_url = 'https://creator.douyin.com/'  # 默认抖音
         
@@ -222,6 +228,7 @@ async def check_login_status(account_id: int) -> Dict:
     session = login_sessions[account_id]
     page = session.get('page')
     context = session.get('context')
+    platform = session.get('platform', 'douyin')
     
     if not page or not context:
         return {
@@ -230,27 +237,44 @@ async def check_login_status(account_id: int) -> Dict:
             'message': '登录会话无效，请重新启动登录'
         }
     
+    # 按平台配置关键 cookie 与 URL
+    if platform == 'xiaohongshu':
+        key_cookies_list = ['web_session', 'a1', 'webId', 'gid']
+        url_creator = 'creator.xiaohongshu.com'
+        url_upload = 'creator.xiaohongshu.com/publish/publish'
+        url_login_check = lambda u: 'login' not in u.lower()
+    elif platform == 'weixin':
+        key_cookies_list = ['wxtoken', 'wxuin', 'MM_WX_NOTIFY_STATE']
+        url_creator = 'channels.weixin.qq.com'
+        url_upload = 'channels.weixin.qq.com'
+        url_login_check = lambda u: 'login' not in u.lower()
+    elif platform == 'tiktok':
+        key_cookies_list = ['sessionid', 'sid_tt', 'tt_chain_token']
+        url_creator = 'tiktok.com'
+        url_upload = 'tiktok.com/upload'
+        url_login_check = lambda u: 'login' not in u.lower()
+    else:
+        key_cookies_list = ['sessionid', 'passport_auth', 'sid_guard', 'passport_csrf_token', 'sid_tt']
+        url_creator = 'creator.douyin.com'
+        url_upload = 'creator.douyin.com/creator-micro/content/upload'
+        url_login_check = lambda u: 'login' not in u.lower() and 'passport' not in u.lower()
+    
     try:
         # 首先尝试获取cookies并检查是否已登录
         try:
             storage_state = await context.storage_state()
             cookies = storage_state.get('cookies', [])
             
-            # 检查是否有抖音的关键cookie
             if cookies:
                 cookie_names = [c.get('name', '') for c in cookies]
-                key_cookies = ['sessionid', 'passport_auth', 'sid_guard', 'passport_csrf_token', 'sid_tt']
-                has_key_cookie = any(name in cookie_names for name in key_cookies)
+                has_key_cookie = any(name in cookie_names for name in key_cookies_list)
                 
                 if has_key_cookie:
-                    # 检查当前URL，确认不在登录页面
                     try:
                         current_url = page.url
-                        # 如果URL不包含login或passport，且包含creator.douyin.com，说明已登录
-                        if 'creator.douyin.com' in current_url and 'login' not in current_url.lower() and 'passport' not in current_url.lower():
+                        if url_creator in current_url and url_login_check(current_url):
                             session['status'] = 'logged_in'
                             session['cookies'] = storage_state
-                            
                             return {
                                 'status': 'logged_in',
                                 'cookies': storage_state,
@@ -258,37 +282,29 @@ async def check_login_status(account_id: int) -> Dict:
                             }
                     except Exception as e:
                         print(f"检查URL失败: {e}")
-                        # 即使URL检查失败，如果有关键cookie，也认为已登录
-                        session['status'] = 'logged_in'
-                        session['cookies'] = storage_state
-                        
-                        return {
-                            'status': 'logged_in',
-                            'cookies': storage_state,
-                            'message': '登录成功（通过cookies检测）'
-                        }
+                    session['status'] = 'logged_in'
+                    session['cookies'] = storage_state
+                    return {
+                        'status': 'logged_in',
+                        'cookies': storage_state,
+                        'message': '登录成功（通过cookies检测）'
+                    }
         except Exception as e:
             print(f"获取cookies失败: {e}")
-            # 继续检查页面状态
         
-        # 确保页面已经加载
         try:
             await page.wait_for_load_state('domcontentloaded', timeout=3000)
         except:
-            pass  # 如果超时，继续执行
+            pass
         
-        # 检查当前URL
         try:
             current_url = page.url
             
-            # 如果URL包含上传页面，说明已登录
-            if 'creator.douyin.com/creator-micro/content/upload' in current_url:
-                # 已登录，获取cookies
+            if url_upload in current_url:
                 try:
                     storage_state = await context.storage_state()
                     session['status'] = 'logged_in'
                     session['cookies'] = storage_state
-                    
                     return {
                         'status': 'logged_in',
                         'cookies': storage_state,
@@ -297,19 +313,15 @@ async def check_login_status(account_id: int) -> Dict:
                 except Exception as e:
                     print(f"获取cookies失败: {e}")
             
-            # 如果URL不包含login或passport，且包含creator.douyin.com，可能已登录
-            if 'creator.douyin.com' in current_url and 'login' not in current_url.lower() and 'passport' not in current_url.lower():
-                # 尝试获取cookies验证
+            if url_creator in current_url and url_login_check(current_url):
                 try:
                     storage_state = await context.storage_state()
                     cookies = storage_state.get('cookies', [])
                     if cookies:
                         cookie_names = [c.get('name', '') for c in cookies]
-                        key_cookies = ['sessionid', 'passport_auth', 'sid_guard']
-                        if any(name in cookie_names for name in key_cookies):
+                        if any(name in cookie_names for name in key_cookies_list):
                             session['status'] = 'logged_in'
                             session['cookies'] = storage_state
-                            
                             return {
                                 'status': 'logged_in',
                                 'cookies': storage_state,
@@ -386,11 +398,9 @@ async def check_login_status(account_id: int) -> Dict:
                 cookies = storage_state.get('cookies', [])
                 if cookies:
                     cookie_names = [c.get('name', '') for c in cookies]
-                    key_cookies = ['sessionid', 'passport_auth', 'sid_guard', 'passport_csrf_token', 'sid_tt']
-                    if any(name in cookie_names for name in key_cookies):
+                    if any(name in cookie_names for name in key_cookies_list):
                         session['status'] = 'logged_in'
                         session['cookies'] = storage_state
-                        
                         return {
                             'status': 'logged_in',
                             'cookies': storage_state,

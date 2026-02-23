@@ -165,6 +165,18 @@
                     ({{ getPlatformAccountCount('xiaohongshu') }})
                   </el-text>
                 </el-checkbox>
+                <el-checkbox label="weixin">
+                  微信视频号
+                  <el-text type="info" size="small" style="margin-left: 5px;">
+                    ({{ getPlatformAccountCount('weixin') }})
+                  </el-text>
+                </el-checkbox>
+                <el-checkbox label="tiktok">
+                  TikTok
+                  <el-text type="info" size="small" style="margin-left: 5px;">
+                    ({{ getPlatformAccountCount('tiktok') }})
+                  </el-text>
+                </el-checkbox>
               </el-checkbox-group>
             </el-form-item>
             <el-form-item label="选择账号" required>
@@ -268,11 +280,14 @@
             <el-form-item label="视频标题" required>
               <el-input
                 v-model="form.video_title"
-                placeholder="请输入视频标题"
-                maxlength="100"
+                :placeholder="hasXiaohongshuAccount ? '请输入视频标题（小红书最多20字）' : '请输入视频标题'"
+                :maxlength="titleMaxLength"
                 show-word-limit
                 clearable
               />
+              <el-text v-if="hasXiaohongshuAccount" type="warning" size="small" style="margin-top: 4px; display: block;">
+                已选小红书账号：标题最多 20 个字符，超出将无法发布
+              </el-text>
             </el-form-item>
             <el-form-item label="视频描述">
               <el-input
@@ -514,10 +529,19 @@ const getPlatformText = (platform) => {
   const map = {
     'douyin': '抖音',
     'kuaishou': '快手',
-    'xiaohongshu': '小红书'
+    'xiaohongshu': '小红书',
+    'weixin': '微信视频号',
+    'tiktok': 'TikTok'
   }
   return map[platform] || platform
 }
+
+// 是否已选小红书账号（小红书标题最多20字）
+const hasXiaohongshuAccount = computed(() => {
+  if (!form.value.account_ids?.length) return false
+  return form.value.account_ids.some(id => accounts.value.find(a => a.id === id)?.platform === 'xiaohongshu')
+})
+const titleMaxLength = computed(() => (hasXiaohongshuAccount.value ? 20 : 100))
 
 const getStatusType = (status) => {
   const map = {
@@ -680,7 +704,9 @@ const getPlatformTagType = (platform) => {
   const typeMap = {
     'douyin': 'danger',
     'kuaishou': 'warning',
-    'xiaohongshu': 'warning'
+    'xiaohongshu': 'warning',
+    'weixin': 'success',
+    'tiktok': 'primary'
   }
   return typeMap[platform] || 'info'
 }
@@ -1026,8 +1052,9 @@ const nextStep = () => {
       ElMessage.warning('请输入视频标题')
       return
     }
-    if (form.value.video_title.length > 100) {
-      ElMessage.warning('视频标题不能超过100个字符')
+    const maxLen = titleMaxLength.value
+    if (form.value.video_title.length > maxLen) {
+      ElMessage.warning(hasXiaohongshuAccount.value ? '小红书标题最多20个字符，请缩短标题' : '视频标题不能超过100个字符')
       return
     }
     if (form.value.video_description && form.value.video_description.length > 500) {
@@ -1057,6 +1084,11 @@ const handleSubmit = async () => {
   }
   if (!form.value.video_title) {
     ElMessage.warning('请输入视频标题')
+    return
+  }
+  const maxLen = titleMaxLength.value
+  if (form.value.video_title.length > maxLen) {
+    ElMessage.warning(hasXiaohongshuAccount.value ? '小红书标题最多20个字符，请缩短后重试' : '视频标题不能超过100个字符')
     return
   }
 

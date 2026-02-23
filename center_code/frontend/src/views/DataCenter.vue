@@ -13,6 +13,8 @@
           <el-option label="抖音" value="douyin" />
           <el-option label="快手" value="kuaishou" />
           <el-option label="小红书" value="xiaohongshu" />
+          <el-option label="微信视频号" value="weixin" />
+          <el-option label="TikTok" value="tiktok" />
         </el-select>
         <el-date-picker
           v-model="dateRange"
@@ -166,8 +168,8 @@
               <!-- 分页组件 -->
               <div class="pagination-container" v-if="totalVideos > 0">
                 <el-pagination
-                  v-model:current-page="currentPage"
-                  v-model:page-size="pageSize"
+                  :current-page="currentPage"
+                  :page-size="pageSize"
                   :page-sizes="[5, 10, 20, 50, 100]"
                   :total="totalVideos"
                   layout="total, sizes, prev, pager, next, jumper"
@@ -245,7 +247,9 @@ const selectedPlatformLabel = computed(() => {
   const platformMap = {
     'douyin': '抖音',
     'kuaishou': '快手',
-    'xiaohongshu': '小红书'
+    'xiaohongshu': '小红书',
+    'weixin': '微信视频号',
+    'tiktok': 'TikTok'
   }
   return filters.value.platform ? platformMap[filters.value.platform] : '所有'
 })

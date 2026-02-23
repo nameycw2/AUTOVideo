@@ -154,20 +154,25 @@ def save_cookies_to_temp(cookies_data: Dict, account_id: Optional[int] = None) -
         
         # 如果origins为空，但cookies不为空，尝试从cookies推断origins
         if not cookies_data['origins'] and cookies_data['cookies']:
-            # 从cookies中提取域名
             domains = set()
             for cookie in cookies_data['cookies']:
                 if isinstance(cookie, dict) and 'domain' in cookie:
                     domain = cookie['domain']
-                    # 移除前导点
                     if domain.startswith('.'):
                         domain = domain[1:]
-                    # 构建完整的origin URL
                     if 'douyin.com' in domain:
                         domains.add(f"https://{domain}")
                         domains.add(f"https://creator.{domain}")
-            
-            # 为每个域名创建origin条目
+                    if 'xiaohongshu.com' in domain:
+                        domains.add(f"https://{domain}")
+                        domains.add("https://creator.xiaohongshu.com")
+                        domains.add("https://www.xiaohongshu.com")
+                    if 'weixin.qq.com' in domain or 'channels.weixin.qq.com' in domain:
+                        domains.add(f"https://{domain}")
+                        domains.add("https://channels.weixin.qq.com")
+                    if 'tiktok.com' in domain:
+                        domains.add(f"https://{domain}")
+                        domains.add("https://www.tiktok.com")
             for domain in domains:
                 cookies_data['origins'].append({
                     'origin': domain,
@@ -244,11 +249,12 @@ async def execute_video_upload(task_id: int):
             douyin_logger.info(f"Video task {task_id} status updated to 'uploading', started_at set")
         
         try:
-            # 获取账号信息（包括cookies）
+            # 获取账号信息（包括cookies、平台）
             account_info = get_account_from_db(task.account_id, db)
             if not account_info:
                 raise Exception(f"Account {task.account_id} not found")
             
+            platform = account_info.get('platform', 'douyin')
             cookies_json = account_info.get('cookies')
             if not cookies_json:
                 raise Exception(f"Account {task.account_id} has no cookies")
@@ -282,9 +288,16 @@ async def execute_video_upload(task_id: int):
             if not has_cookies and not has_origins:
                 raise Exception("Cookies data is empty or invalid format")
             
-            # 检查关键cookies是否存在
+            # 检查关键cookies是否存在（按平台）
             cookie_names = [c.get('name', '') for c in cookies_list if isinstance(c, dict)]
-            important_cookies = ['sessionid', 'passport_auth', 'passport_csrf_token', 'sid_guard', 'uid_tt', 'sid_tt']
+            if platform == 'xiaohongshu':
+                important_cookies = ['web_session', 'a1', 'webId', 'gid']
+            elif platform == 'weixin':
+                important_cookies = ['wxtoken', 'wxuin', 'MM_WX_NOTIFY_STATE']
+            elif platform == 'tiktok':
+                important_cookies = ['sessionid', 'sid_tt', 'tt_chain_token']
+            else:
+                important_cookies = ['sessionid', 'passport_auth', 'passport_csrf_token', 'sid_guard', 'uid_tt', 'sid_tt']
             missing_important = [name for name in important_cookies if name not in cookie_names]
             
             # 输出cookies诊断信息（同时使用logger和print确保能看到）
@@ -449,7 +462,8 @@ async def execute_video_upload(task_id: int):
                 task.publish_date,
                 account_file,
                 task.thumbnail_url,
-                task.account_id
+                task.account_id,
+                platform=platform
             )
             
             # 明确记录从 uploader 返回的结果
@@ -691,26 +705,83 @@ async def execute_video_upload(task_id: int):
                 pass
 
 
-async def execute_upload(title: str, file_path: str, tags: list, publish_date, account_file: str, thumbnail_path: str = None, account_id: int = None):
-    """执行视频上传"""
+async def execute_upload(title: str, file_path: str, tags: list, publish_date, account_file: str, thumbnail_path: str = None, account_id: int = None, platform: str = 'douyin'):
+    """执行视频上传，按平台分发到对应上传器"""
     try:
-        app = DouYinVideo(
-            title=title,
-            file_path=file_path,
-            tags=tags,
-            publish_date=publish_date,
-            account_file=account_file,
-            thumbnail_path=thumbnail_path,
-            account_id=account_id  # 传递 account_id，用于自动登录时更新数据库
-        )
-        # 执行上传，upload 方法现在会返回更新后的cookies
-        print(f"[UPLOAD] 开始调用 DouYinVideo.main() 执行视频上传...")
-        if douyin_logger:
-            douyin_logger.info(f"开始调用 DouYinVideo.main() 执行视频上传: {title}")
+        if platform == 'xiaohongshu':
+            try:
+                from uploader.xiaohongshu_uploader.main import XiaohongshuVideo
+            except ImportError as e:
+                if douyin_logger:
+                    douyin_logger.error(f"无法导入小红书上传器: {e}")
+                raise Exception("小红书上传模块未安装或不可用")
+            app = XiaohongshuVideo(
+                title=title,
+                file_path=file_path,
+                tags=tags,
+                publish_date=publish_date,
+                account_file=account_file,
+                thumbnail_path=thumbnail_path,
+                account_id=account_id
+            )
+            print(f"[UPLOAD] 开始调用 XiaohongshuVideo.main() 执行视频上传...")
+            if douyin_logger:
+                douyin_logger.info(f"开始调用 XiaohongshuVideo.main() 执行视频上传: {title}")
+        elif platform == 'weixin':
+            try:
+                from uploader.weixin_uploader.main import WeixinVideo
+            except ImportError as e:
+                if douyin_logger:
+                    douyin_logger.error(f"无法导入微信视频号上传器: {e}")
+                raise Exception("微信视频号上传模块未安装或不可用")
+            app = WeixinVideo(
+                title=title,
+                file_path=file_path,
+                tags=tags,
+                publish_date=publish_date,
+                account_file=account_file,
+                thumbnail_path=thumbnail_path,
+                account_id=account_id
+            )
+            print(f"[UPLOAD] 开始调用 WeixinVideo.main() 执行视频上传...")
+            if douyin_logger:
+                douyin_logger.info(f"开始调用 WeixinVideo.main() 执行视频上传: {title}")
+        elif platform == 'tiktok':
+            try:
+                from uploader.tiktok_uploader.main import TiktokVideo
+            except ImportError as e:
+                if douyin_logger:
+                    douyin_logger.error(f"无法导入TikTok上传器: {e}")
+                raise Exception("TikTok上传模块未安装或不可用")
+            app = TiktokVideo(
+                title=title,
+                file_path=file_path,
+                tags=tags,
+                publish_date=publish_date,
+                account_file=account_file,
+                thumbnail_path=thumbnail_path,
+                account_id=account_id
+            )
+            print(f"[UPLOAD] 开始调用 TiktokVideo.main() 执行视频上传...")
+            if douyin_logger:
+                douyin_logger.info(f"开始调用 TiktokVideo.main() 执行视频上传: {title}")
+        else:
+            app = DouYinVideo(
+                title=title,
+                file_path=file_path,
+                tags=tags,
+                publish_date=publish_date,
+                account_file=account_file,
+                thumbnail_path=thumbnail_path,
+                account_id=account_id
+            )
+            print(f"[UPLOAD] 开始调用 DouYinVideo.main() 执行视频上传...")
+            if douyin_logger:
+                douyin_logger.info(f"开始调用 DouYinVideo.main() 执行视频上传: {title}")
         
         updated_cookies = await app.main()
         
-        print(f"[UPLOAD] DouYinVideo.main() 执行完成，返回结果类型: {type(updated_cookies).__name__}")
+        print(f"[UPLOAD] 执行完成，返回结果类型: {type(updated_cookies).__name__}")
         if douyin_logger:
             douyin_logger.success(f"Video uploaded successfully: {title}")
             if updated_cookies:
@@ -723,12 +794,10 @@ async def execute_upload(title: str, file_path: str, tags: list, publish_date, a
             else:
                 douyin_logger.warning(f"未收到返回数据，将尝试从文件读取")
         
-        # 如果 upload 方法返回了cookies，直接返回
         if updated_cookies:
             print(f"[UPLOAD] 返回 uploader 的返回结果给 task_executor")
             return updated_cookies
         
-        # 如果 upload 方法没有返回cookies，尝试从文件读取
         print(f"[UPLOAD] uploader 未返回数据，尝试从文件读取 cookies...")
         try:
             if os.path.exists(account_file):
@@ -742,8 +811,6 @@ async def execute_upload(title: str, file_path: str, tags: list, publish_date, a
             if douyin_logger:
                 douyin_logger.warning(f"Failed to read updated cookies: {e}, but upload was successful")
         
-        # 即使读取cookies失败，也返回一个标记表示上传成功
-        # 这样调用方可以知道上传已完成
         print(f"[UPLOAD] cookies 读取失败，返回成功标记给 task_executor")
         if douyin_logger:
             douyin_logger.info(f"返回上传成功标记给 task_executor，任务状态将被更新为 completed")
@@ -751,7 +818,7 @@ async def execute_upload(title: str, file_path: str, tags: list, publish_date, a
     except Exception as e:
         if douyin_logger:
             douyin_logger.error(f"Video upload failed: {e}")
-        raise  # 重新抛出异常，让调用方处理
+        raise
 
 
 async def execute_chat_send(task_id: int):

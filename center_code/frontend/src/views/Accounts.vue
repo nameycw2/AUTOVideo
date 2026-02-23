@@ -17,6 +17,8 @@
           <el-option label="抖音" value="douyin" />
           <el-option label="快手" value="kuaishou" />
           <el-option label="小红书" value="xiaohongshu" />
+          <el-option label="微信视频号" value="weixin" />
+          <el-option label="TikTok" value="tiktok" />
         </el-select>
         <el-select v-model="filters.login_status" placeholder="登录状态" clearable style="width: 150px; margin-right: 10px;">
           <el-option label="已登录" value="logged_in" />
@@ -110,7 +112,7 @@
           <span v-else-if="loginStatus === 'scanning'">已扫描，等待用户确认登录...</span>
         </p>
         <p style="margin-top: 10px; color: #999; font-size: 14px;">
-          请使用抖音APP扫描浏览器中的二维码完成登录
+          {{ currentLoginAccount?.platform === 'xiaohongshu' ? '请使用小红书APP扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'weixin' ? '请使用微信扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'tiktok' ? '请在浏览器中完成 TikTok 登录（邮箱/手机/第三方）' : '请使用抖音APP扫描浏览器中的二维码完成登录' }}
         </p>
       </div>
       
@@ -168,7 +170,9 @@ const getPlatformText = (platform) => {
   const map = {
     'douyin': '抖音',
     'kuaishou': '快手',
-    'xiaohongshu': '小红书'
+    'xiaohongshu': '小红书',
+    'weixin': '微信视频号',
+    'tiktok': 'TikTok'
   }
   return map[platform] || platform
 }

@@ -22,6 +22,14 @@
                 <el-icon><VideoPlay /></el-icon>
                 小红书
               </el-radio-button>
+              <el-radio-button label="weixin">
+                <el-icon><VideoPlay /></el-icon>
+                微信视频号
+              </el-radio-button>
+              <el-radio-button label="tiktok">
+                <el-icon><VideoPlay /></el-icon>
+                TikTok
+              </el-radio-button>
             </el-radio-group>
           </div>
         </div>
@@ -82,6 +90,8 @@
               <el-option label="抖音" value="douyin" />
               <el-option label="快手" value="kuaishou" />
               <el-option label="小红书" value="xiaohongshu" />
+              <el-option label="微信视频号" value="weixin" />
+              <el-option label="TikTok" value="tiktok" />
             </el-select>
             <el-link type="primary" :underline="false">查看全部 ></el-link>
           </div>

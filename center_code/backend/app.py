@@ -17,30 +17,31 @@ from flask_cors import CORS
 from models import Base
 from db import engine
 
-# 导入所有 Blueprint
-from blueprints.auth import auth_bp
-from blueprints.devices import devices_bp
-from blueprints.accounts import accounts_bp
-from blueprints.video import video_bp
-from blueprints.chat import chat_bp
-from blueprints.listen import listen_bp
-from blueprints.social import social_bp
-from blueprints.messages import messages_bp
-from blueprints.stats import stats_bp
-from blueprints.login import login_bp
-from blueprints.publish_plans import publish_plans_bp
-from blueprints.merchants import merchants_bp
-from blueprints.video_library import video_library_bp
-from blueprints.data_center import data_center_bp
-from blueprints.video_editor import video_editor_bp
-from blueprints.publish import publish_bp
-from blueprints.material import material_bp
-from blueprints.ai import ai_bp
-from blueprints.editor import editor_bp
+# 导入所有 API 模块（按功能划分）
+from api.auth import auth_bp
+from api.users import users_bp
+from api.devices import devices_bp
+from api.accounts import accounts_bp
+from api.video import video_bp
+from api.chat import chat_bp
+from api.listen import listen_bp
+from api.social import social_bp
+from api.messages import messages_bp
+from api.stats import stats_bp
+from api.login import login_bp
+from api.publish_plans import publish_plans_bp
+from api.merchants import merchants_bp
+from api.video_library import video_library_bp
+from api.data_center import data_center_bp
+from api.video_editor import video_editor_bp
+from api.publish import publish_bp
+from api.material import material_bp
+from api.ai import ai_bp
+from api.editor import editor_bp
 
 # 导入任务处理器
 from services.task_processor import get_task_processor
-from auto_transcode_worker import maybe_start_transcode_worker
+from workers.auto_transcode_worker import maybe_start_transcode_worker
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='')
 
@@ -238,6 +239,7 @@ def handle_exception(e):
 blueprint_modules = {
     '认证授权模块': [
         ('auth', auth_bp),
+        ('users', users_bp),
         ('login', login_bp),
     ],
     '设备管理模块': [
@@ -547,7 +549,7 @@ def print_startup_info():
         try:
             started = maybe_start_transcode_worker()
             if started:
-                print("  ✅ 转码 Worker - 已自动拉起（worker_transcode.py）")
+                print("  ✅ 转码 Worker - 已自动拉起（workers.worker_transcode）")
             else:
                 print("  ⏭️  转码 Worker - 未拉起（无待处理任务或已在运行）")
         except Exception as e:

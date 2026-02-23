@@ -88,6 +88,12 @@ const routes = [
         component: () => import('../views/Profile.vue'),
         meta: { requiresAuth: true, title: 'Profile' }
       },
+      {
+        path: 'user-management',
+        name: 'UserManagement',
+        component: () => import('../views/UserManagement.vue'),
+        meta: { requiresAuth: true, requiresAdminOrParent: true, title: '用户管理' }
+      },
 
     ]
   },
@@ -113,15 +119,22 @@ router.beforeEach(async (to, from, next) => {
   const authStore = useAuthStore()
 
   const needsAuth = to.meta.requiresAuth
+  const requiresAdminOrParent = to.meta.requiresAdminOrParent
   const isGuestOnly = to.meta.guestOnly
 
   if (needsAuth) {
     if (authStore.isLoggedIn) {
+      if (requiresAdminOrParent && !authStore.canManageUsers()) {
+        return next('/dashboard')
+      }
       return next()
     }
     if (authStore.token) {
       const ok = await authStore.checkLogin()
       if (ok) {
+        if (requiresAdminOrParent && !authStore.canManageUsers()) {
+          return next('/dashboard')
+        }
         return next()
       }
     }

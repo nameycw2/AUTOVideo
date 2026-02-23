@@ -30,6 +30,8 @@ try:
         login_required = backend_utils.login_required
         has_valid_token = backend_utils.has_valid_token
         get_current_user_id = backend_utils.get_current_user_id
+        get_current_user_obj = backend_utils.get_current_user_obj
+        get_current_user_role = getattr(backend_utils, 'get_current_user_role', None)
         create_access_token = backend_utils.create_access_token
         decode_access_token = backend_utils.decode_access_token
         model_to_dict = backend_utils.model_to_dict
@@ -53,6 +55,12 @@ except Exception as e:
         return False
 
     def get_current_user_id():
+        return None
+
+    def get_current_user_obj():
+        return None
+
+    def get_current_user_role():
         return None
 
     def create_access_token(user_id, username, email):

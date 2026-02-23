@@ -55,6 +55,10 @@
         <el-icon><Edit /></el-icon>
         <template #title>AI视频剪辑</template>
       </el-menu-item>
+      <el-menu-item v-if="showUserManagement" index="/user-management">
+        <el-icon><User /></el-icon>
+        <template #title>用户管理</template>
+      </el-menu-item>
     </el-menu>
   </div>
 </template>
@@ -62,6 +66,7 @@
 <script setup>
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
+import { useAuthStore } from '../../stores/auth'
 // 图标已在 main.js 中全局注册
 
 defineProps({
@@ -75,6 +80,8 @@ defineEmits(['toggle'])
 
 const route = useRoute()
 const activeMenu = computed(() => route.path)
+const authStore = useAuthStore()
+const showUserManagement = computed(() => authStore.canManageUsers())
 </script>
 
 <style scoped>

@@ -42,7 +42,9 @@ apiClient.interceptors.response.use(
         authStore.isLoggedIn = false
         authStore.username = ''
         authStore.email = ''
-        authStore.token = ''
+        authStore.role = ''
+        authStore.parentId = null
+        authStore.setToken('')
       }).catch(() => {
         console.warn('Unable to import auth store for 401 handling')
       })
@@ -72,6 +74,13 @@ apiClient.interceptors.response.use(
 )
 
 const api = {
+  users: {
+    list: () => apiClient.get('/users'),
+    parents: () => apiClient.get('/users/parents'),
+    get: (id) => apiClient.get(`/users/${id}`),
+    create: (data) => apiClient.post('/users', data),
+    update: (id, data) => apiClient.put(`/users/${id}`, data)
+  },
   auth: {
     checkLogin: () => apiClient.get('/auth/check'),
     sendCode: (email) => apiClient.post('/auth/send-code', { email }),

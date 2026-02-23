@@ -5,7 +5,7 @@ import sys
 
 # 兼容导入：优先从当前目录导入，如果不存在则从services.config导入
 try:
-    from conf import BASE_DIR
+    from config import BASE_DIR
 except ImportError:
     # 如果conf不存在，使用backend目录作为BASE_DIR
     BASE_DIR = Path(__file__).parent.parent.resolve()

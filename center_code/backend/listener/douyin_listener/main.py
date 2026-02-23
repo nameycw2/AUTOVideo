@@ -18,7 +18,7 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright, Playwright, Page, Locator
 
-from conf import LOCAL_CHROME_PATH, LOCAL_CHROME_HEADLESS, BASE_DIR
+from config import LOCAL_CHROME_PATH, LOCAL_CHROME_HEADLESS, BASE_DIR
 from utils.base_social_media import set_init_script
 from utils.log import douyin_logger
 

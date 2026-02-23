@@ -9,7 +9,7 @@ import os
 from typing import Optional, Dict
 from datetime import datetime
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
-from conf import LOCAL_CHROME_PATH, LOCAL_CHROME_HEADLESS
+from config import LOCAL_CHROME_PATH, LOCAL_CHROME_HEADLESS
 from utils.base_social_media import set_init_script
 import threading
 

@@ -4,7 +4,7 @@ from loguru import logger
 
 # 兼容导入：优先从当前目录导入，如果不存在则使用backend目录
 try:
-    from conf import BASE_DIR
+    from config import BASE_DIR
 except ImportError:
     BASE_DIR = Path(__file__).parent.parent.resolve()
 

@@ -12,7 +12,7 @@ from flask import Blueprint, request
 from werkzeug.utils import secure_filename
 
 from utils import response_success, response_error, create_access_token, decode_access_token
-from models import User, EmailVerification
+from models import User, EmailVerification, USER_ROLE_SUPER_ADMIN, USER_ROLE_CHILD
 from config import SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM, SMTP_USE_SSL, SMTP_USE_TLS
 from db import get_db
 
@@ -139,7 +139,10 @@ def register():
         if verif.expires_at < datetime.utcnow():
             return response_error('验证码已过期', 400)
 
-        user = User(username=username, email=email, is_verified=True)
+        # 首个注册用户设为超级管理员，其余为子账号
+        is_first = db.query(User).count() == 0
+        role = USER_ROLE_SUPER_ADMIN if is_first else USER_ROLE_CHILD
+        user = User(username=username, email=email, is_verified=True, role=role, parent_id=None)
         user.set_password(password)
         db.add(user)
         verif.used_at = datetime.utcnow()
@@ -185,13 +188,17 @@ def login():
             username = user.username
             email_value = user.email
             avatar_url = _normalize_avatar_url(user.avatar_url)
-            token = create_access_token(user_id, username, email_value)
+            role = getattr(user, 'role', None) or USER_ROLE_CHILD
+            parent_id = getattr(user, 'parent_id', None)
+            token = create_access_token(user_id, username, email_value, role=role, parent_id=parent_id)
 
         return response_success({
             'token': token,
             'username': username,
             'email': email_value,
-            'avatar_url': avatar_url
+            'avatar_url': avatar_url,
+            'role': role,
+            'parent_id': parent_id
         }, '登录成功', 200)
 
     login_id = (data.get('username') or data.get('email') or '').strip()
@@ -221,13 +228,17 @@ def login():
         username = user.username
         email_value = user.email
         avatar_url = _normalize_avatar_url(user.avatar_url)
-        token = create_access_token(user_id, username, email_value)
+        role = getattr(user, 'role', None) or USER_ROLE_CHILD
+        parent_id = getattr(user, 'parent_id', None)
+        token = create_access_token(user_id, username, email_value, role=role, parent_id=parent_id)
 
     return response_success({
         'token': token,
         'username': username,
         'email': email_value,
-        'avatar_url': avatar_url
+        'avatar_url': avatar_url,
+        'role': role,
+        'parent_id': parent_id
     }, 'Login success', 200)
 
 
@@ -261,12 +272,16 @@ def check():
         if not user:
             return response_success({'logged_in': False}, 'success', 200)
         avatar_url = _normalize_avatar_url(user.avatar_url)
+        role = getattr(user, 'role', None) or USER_ROLE_CHILD
+        parent_id = getattr(user, 'parent_id', None)
 
     return response_success({
         'logged_in': True,
         'username': payload.get('username'),
         'email': payload.get('email'),
-        'avatar_url': avatar_url
+        'avatar_url': avatar_url,
+        'role': role,
+        'parent_id': parent_id
     }, 'success', 200)
 
 
@@ -303,7 +318,9 @@ def get_profile():
             'username': user.username,
             'email': user.email,
             'avatar_url': _normalize_avatar_url(user.avatar_url),
-            'is_verified': user.is_verified
+            'is_verified': user.is_verified,
+            'role': getattr(user, 'role', None) or USER_ROLE_CHILD,
+            'parent_id': getattr(user, 'parent_id', None)
         }
     return response_success(payload)
 

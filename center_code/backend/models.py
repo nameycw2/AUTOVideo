@@ -8,6 +8,12 @@ from werkzeug.security import generate_password_hash, check_password_hash
 Base = declarative_base()
 
 
+# 用户角色：super_admin=超级管理员, parent=母账号, child=子账号
+USER_ROLE_SUPER_ADMIN = 'super_admin'
+USER_ROLE_PARENT = 'parent'
+USER_ROLE_CHILD = 'child'
+
+
 class User(Base):
     """用户表"""
     __tablename__ = 'users'
@@ -18,6 +24,12 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     avatar_url = Column(String(500))
     is_verified = Column(Boolean, default=False)
+    # 角色：super_admin / parent / child
+    role = Column(String(32), default=USER_ROLE_CHILD, nullable=False, index=True)
+    # 子账号归属的母账号 ID，仅 role=child 时有值
+    parent_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
+    # 母账号下属子账号数量上限，仅 role=parent 时有效；NULL 表示不限制
+    max_children = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now())
     updated_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now(),
                        onupdate=lambda: __import__('datetime').datetime.now())

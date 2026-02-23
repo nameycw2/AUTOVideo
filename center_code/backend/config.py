@@ -1,17 +1,18 @@
 """
-数据库配置文件
+统一配置文件：数据库、应用、浏览器、第三方服务等
 使用 MySQL 数据库
 
 配置方式：
 1. 创建 .env 文件（推荐，本地开发使用）
 2. 设置系统环境变量（生产环境推荐）
-3. 直接修改下面的 MYSQL_CONFIG 字典（不推荐）
+3. 直接修改默认值（不推荐）
 
 .env 文件示例请参考 env.example 文件
 """
 import os
 import json
 import sys
+import shutil
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -238,3 +239,27 @@ if not COS_SECRET_ID or not COS_SECRET_KEY or not COS_BUCKET:
     print("  set COS_BUCKET=your-bucket-name")
     print("  set COS_DOMAIN=https://your-bucket.cos.ap-nanjing.myqcloud.com  # 可选")
     print()
+
+# =========================
+# 路径与浏览器配置（原 conf.py）
+# =========================
+BASE_DIR = Path(__file__).parent.resolve()
+XHS_SERVER = os.environ.get("XHS_SERVER", "http://127.0.0.1:11901")
+
+# Chrome 浏览器路径：环境变量 > 自动检测
+LOCAL_CHROME_PATH = os.environ.get('LOCAL_CHROME_PATH', '')
+if not LOCAL_CHROME_PATH:
+    common_paths = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expanduser(r"~\AppData\Local\Google\Chrome\Application\chrome.exe"),
+        os.path.expanduser(r"~\AppData\Local\Microsoft\Edge\Application\msedge.exe"),
+    ]
+    for path in common_paths:
+        if os.path.exists(path):
+            LOCAL_CHROME_PATH = path
+            break
+    if not LOCAL_CHROME_PATH:
+        chrome_exe = shutil.which('chrome') or shutil.which('google-chrome') or shutil.which('chromium')
+        LOCAL_CHROME_PATH = chrome_exe if chrome_exe else None
+LOCAL_CHROME_HEADLESS = os.environ.get('LOCAL_CHROME_HEADLESS', 'False').lower() == 'true'

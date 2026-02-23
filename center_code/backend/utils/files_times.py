@@ -3,7 +3,7 @@ from pathlib import Path
 
 # 兼容导入
 try:
-    from conf import BASE_DIR
+    from config import BASE_DIR
 except ImportError:
     BASE_DIR = Path(__file__).parent.parent.resolve()
 

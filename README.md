@@ -25,32 +25,38 @@
 
 ```
 center_code/
-├── backend/                 # 后端代码
-│   ├── app.py              # Flask 应用主文件
-│   ├── config.py           # 配置文件
-│   ├── db.py               # 数据库连接管理
-│   ├── models.py           # 数据模型定义
-│   ├── utils.py            # 工具函数
-│   ├── init_database.py    # 数据库初始化脚本
-│   ├── init_user.py        # 默认用户创建脚本
-│   ├── test_db.py          # 数据库测试脚本
-│   ├── requirements.txt     # Python 依赖
-│   └── blueprints/         # API 路由模块
-│       ├── auth.py         # 认证相关 API
-│       ├── devices.py      # 设备管理 API
-│       ├── accounts.py     # 账号管理 API
-│       ├── video.py        # 视频任务 API
-│       ├── chat.py         # 对话任务 API
-│       ├── listen.py       # 监听任务 API
-│       ├── social.py       # 社交功能 API
-│       ├── messages.py     # 消息管理 API
-│       ├── stats.py        # 统计信息 API
-│       ├── login.py        # 登录流程 API
-│       ├── publish_plans.py # 发布计划 API
-│       ├── merchants.py    # 商家管理 API
-│       ├── video_library.py # 视频库 API
-│       ├── data_center.py  # 数据中心 API
-│       └── video_editor.py  # AI视频剪辑 API
+├── backend/                 # 后端代码（按功能模块划分）
+│   ├── app.py              # Flask 应用入口
+│   ├── config.py           # 统一配置（数据库/应用/浏览器等）
+│   ├── db.py               # 数据库连接
+│   ├── models.py           # 数据模型
+│   ├── utils.py            # 通用工具
+│   ├── api/                # API 模块（按功能划分）
+│   │   ├── auth.py         # 认证
+│   │   ├── login.py        # 登录（二维码等）
+│   │   ├── accounts.py     # 账号管理
+│   │   ├── devices.py      # 设备管理
+│   │   ├── video.py        # 视频任务
+│   │   ├── chat.py         # 对话任务
+│   │   ├── listen.py       # 监听任务
+│   │   ├── social.py       # 社交
+│   │   ├── messages.py     # 消息
+│   │   ├── stats.py        # 统计
+│   │   ├── publish_plans.py # 发布计划
+│   │   ├── publish.py      # 发布
+│   │   ├── merchants.py    # 商家
+│   │   ├── video_library.py# 视频库
+│   │   ├── data_center.py  # 数据中心
+│   │   ├── video_editor.py  # 视频剪辑
+│   │   ├── editor.py       # 剪辑器
+│   │   ├── material.py     # 素材
+│   │   └── ai.py           # AI
+│   ├── services/           # 业务服务层
+│   ├── workers/            # 后台 Worker（转码等）
+│   │   ├── worker_transcode.py
+│   │   └── auto_transcode_worker.py
+│   ├── scripts/            # 脚本与迁移（如 repair_db）
+│   └── utils/              # 子工具模块
 │
 ├── frontend/               # 前端代码
 │   ├── src/

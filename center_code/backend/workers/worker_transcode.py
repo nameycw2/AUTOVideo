@@ -2,8 +2,8 @@
 Material transcode worker (standalone process).
 
 Queue table: material_transcode_tasks
+运行方式：在 backend 目录下执行 python -m workers.worker_transcode
 """
-
 import os
 import socket
 import subprocess
@@ -13,9 +13,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.insert(0, current_dir)
+# 确保 backend 在 path 中，以便导入 db、models、media_utils
+_backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
 
 from sqlalchemy import text
 
@@ -23,7 +24,8 @@ from db import get_db
 from models import MaterialTranscodeTask
 from media_utils import ffprobe, get_duration_seconds, resolve_ffmpeg_exe
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = _backend_dir
+
 
 @dataclass(frozen=True)
 class TaskInfo:
@@ -84,8 +86,6 @@ def claim_one(wid: str, lock_timeout_seconds: int) -> Optional[TaskInfo]:
         if not task:
             return None
 
-        # Important: do not return ORM instances from this function.
-        # get_db() commits on exit which expires ORM attributes, leading to detached instances.
         return TaskInfo(
             id=int(task.id),
             material_id=int(task.material_id),

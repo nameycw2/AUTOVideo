@@ -1570,7 +1570,7 @@ def list_outputs():
                 db_video_map = {}
                 for video in user_videos:
                     if video.video_url:
-                        from blueprints.video_library import _extract_cos_key_from_url
+                        from api.video_library import _extract_cos_key_from_url
                         cos_key = _extract_cos_key_from_url(video.video_url)
                         if cos_key:
                             db_video_map[cos_key] = video
@@ -1613,7 +1613,7 @@ def list_outputs():
                             thumbnail_url = None
                             if db_video.thumbnail_url:
                                 # 刷新COS URL（如果是COS URL）
-                                from blueprints.video_library import _refresh_cos_url_if_needed
+                                from api.video_library import _refresh_cos_url_if_needed
                                 thumbnail_url = _refresh_cos_url_if_needed(db_video.thumbnail_url)
                             
                             items.append({
@@ -1719,12 +1719,12 @@ def _list_outputs_from_db(user_id=None):
                     video_url = video.video_url or ''
                     thumbnail_url = None
                     if video.thumbnail_url:
-                        from blueprints.video_library import _refresh_cos_url_if_needed
+                        from api.video_library import _refresh_cos_url_if_needed
                         thumbnail_url = _refresh_cos_url_if_needed(video.thumbnail_url)
                     
                     # 刷新视频URL
                     if video_url:
-                        from blueprints.video_library import _refresh_cos_url_if_needed
+                        from api.video_library import _refresh_cos_url_if_needed
                         video_url = _refresh_cos_url_if_needed(video_url)
                     
                     items.append({

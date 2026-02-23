@@ -28,7 +28,7 @@ def response_error(message='error', code=400, data=None):
     }), code
 
 
-def create_access_token(user_id, username, email):
+def create_access_token(user_id, username, email, role=None, parent_id=None):
     """创建JWT访问令牌"""
     secret = os.getenv('JWT_SECRET', 'change-me-in-production')
     payload = {
@@ -38,6 +38,10 @@ def create_access_token(user_id, username, email):
         'iat': datetime.utcnow(),
         'exp': datetime.utcnow() + timedelta(hours=24)
     }
+    if role is not None:
+        payload['role'] = role
+    if parent_id is not None:
+        payload['parent_id'] = parent_id
     return jwt.encode(payload, secret, algorithm='HS256')
 
 
@@ -141,6 +145,43 @@ def get_current_user_id():
             if not user:
                 return None
             return user_id
+    except Exception:
+        return None
+
+
+def get_current_user_role():
+    """获取当前登录用户的 role，未登录返回 None"""
+    uid = get_current_user_id()
+    if uid is None:
+        return None
+    try:
+        with get_db() as db:
+            user = db.query(User).filter(User.id == uid).first()
+            return user.role if user else None
+    except Exception:
+        return None
+
+
+def get_current_user_obj():
+    """
+    获取当前登录用户信息（在 session 内读取属性后返回普通对象，避免 DetachedInstanceError）。
+    返回对象具有 id, role, parent_id, max_children 等属性；未登录返回 None。
+    """
+    uid = get_current_user_id()
+    if uid is None:
+        return None
+    try:
+        with get_db() as db:
+            user = db.query(User).filter(User.id == uid).first()
+            if not user:
+                return None
+            # 在 session 内读取所需属性，返回普通对象供 session 外使用
+            return type('CurrentUser', (), {
+                'id': user.id,
+                'role': getattr(user, 'role', None) or 'child',
+                'parent_id': getattr(user, 'parent_id', None),
+                'max_children': getattr(user, 'max_children', None),
+            })()
     except Exception:
         return None
 

@@ -1,7 +1,15 @@
+"""
+自动拉起转码 Worker：在应用启动时若存在待处理任务则启动 workers.worker_transcode 子进程。
+"""
 import os
 import sys
 import subprocess
 from datetime import datetime
+
+# 确保 backend 在 path 中
+_backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
 
 
 def _truthy(v: str) -> bool:
@@ -30,7 +38,6 @@ def _is_pid_running(pid: int) -> bool:
 
     try:
         import ctypes  # type: ignore
-
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
         if handle:
@@ -51,11 +58,9 @@ class _FileLock:
         self.f = open(self.path, "a+", encoding="utf-8")
         if os.name == "nt":
             import msvcrt
-
             msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
         else:
             import fcntl
-
             fcntl.flock(self.f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         return self
 
@@ -64,7 +69,6 @@ class _FileLock:
             if self.f:
                 if os.name == "nt":
                     import msvcrt
-
                     try:
                         self.f.seek(0)
                         msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
@@ -72,7 +76,6 @@ class _FileLock:
                         pass
                 else:
                     import fcntl
-
                     try:
                         fcntl.flock(self.f.fileno(), fcntl.LOCK_UN)
                     except Exception:
@@ -102,7 +105,6 @@ def _has_pending_work() -> bool:
             )
             if pending:
                 return True
-
             processing = db.query(Material.id).filter(Material.status == "processing").limit(1).first()
             return processing is not None
     except Exception:
@@ -112,10 +114,6 @@ def _has_pending_work() -> bool:
 def maybe_start_transcode_worker() -> bool:
     """
     Auto-start transcode worker when enabled and there is pending/processing work.
-
-    Enable rules:
-    - If AUTO_START_TRANSCODE_WORKER=true => enabled even in production.
-    - Else enabled only when not production.
     """
     enabled = _truthy(os.getenv("AUTO_START_TRANSCODE_WORKER", ""))
     if not enabled and _is_production():
@@ -123,7 +121,7 @@ def maybe_start_transcode_worker() -> bool:
     if not enabled and not _has_pending_work():
         return False
 
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    base_dir = _backend_dir
     logs_dir = os.path.join(base_dir, "logs")
     lock_path = os.path.join(logs_dir, "worker_transcode.lock")
     pid_path = os.path.join(logs_dir, "worker_transcode.pid")
@@ -131,7 +129,6 @@ def maybe_start_transcode_worker() -> bool:
 
     try:
         with _FileLock(lock_path):
-            # If already running, skip.
             try:
                 if os.path.exists(pid_path):
                     raw = open(pid_path, "r", encoding="utf-8").read().strip()
@@ -142,7 +139,8 @@ def maybe_start_transcode_worker() -> bool:
             except Exception:
                 pass
 
-            worker_py = os.path.join(base_dir, "worker_transcode.py")
+            worker_module = "workers.worker_transcode"
+            worker_py = os.path.join(base_dir, "workers", "worker_transcode.py")
             if not os.path.exists(worker_py):
                 return False
 
@@ -161,7 +159,7 @@ def maybe_start_transcode_worker() -> bool:
                 )
 
             p = subprocess.Popen(
-                [sys.executable, worker_py],
+                [sys.executable, "-m", worker_module],
                 cwd=base_dir,
                 stdout=logf,
                 stderr=logf,
@@ -179,4 +177,3 @@ def maybe_start_transcode_worker() -> bool:
             return True
     except Exception:
         return False
-

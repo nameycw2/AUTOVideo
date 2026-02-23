@@ -10,6 +10,8 @@ export const useAuthStore = defineStore('auth', () => {
   const username = ref('')
   const email = ref('')
   const avatarUrl = ref('')
+  const role = ref('')
+  const parentId = ref(null)
   const isCheckingLogin = ref(false)
 
   const setToken = (value) => {
@@ -41,6 +43,8 @@ export const useAuthStore = defineStore('auth', () => {
         username.value = res.data.username || ''
         email.value = res.data.email || ''
         avatarUrl.value = res.data.avatar_url || ''
+        role.value = res.data.role || ''
+        parentId.value = res.data.parent_id != null ? res.data.parent_id : null
         return true
       }
 
@@ -48,6 +52,8 @@ export const useAuthStore = defineStore('auth', () => {
       username.value = ''
       email.value = ''
       avatarUrl.value = ''
+      role.value = ''
+      parentId.value = null
       return false
     } catch (error) {
       setToken('')
@@ -69,6 +75,8 @@ export const useAuthStore = defineStore('auth', () => {
         username.value = res.data.username || payload.username || payload.email || ''
         email.value = res.data.email || payload.email || ''
         avatarUrl.value = res.data.avatar_url || ''
+        role.value = res.data.role || ''
+        parentId.value = res.data.parent_id != null ? res.data.parent_id : null
         return { success: true }
       }
       return { success: false, message: res?.message || 'Login failed' }
@@ -99,7 +107,13 @@ export const useAuthStore = defineStore('auth', () => {
       username.value = ''
       email.value = ''
       avatarUrl.value = ''
+      role.value = ''
+      parentId.value = null
     }
+  }
+
+  const canManageUsers = () => {
+    return role.value === 'super_admin' || role.value === 'parent'
   }
 
   return {
@@ -108,7 +122,10 @@ export const useAuthStore = defineStore('auth', () => {
     username,
     email,
     avatarUrl,
+    role,
+    parentId,
     isCheckingLogin,
+    canManageUsers,
     checkLogin,
     login,
     register,

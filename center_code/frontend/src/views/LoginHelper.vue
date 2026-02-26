@@ -194,10 +194,10 @@ const startPollingStatus = () => {
   // 立即检查一次
   checkLoginStatus()
   
-  // 每3秒检查一次
+  // 每 5 秒检查一次（间隔不宜过短，避免后端频繁读页面导致二维码页被刷新/失效）
   statusPollTimer = setInterval(() => {
     checkLoginStatus()
-  }, 3000)
+  }, 5000)
 }
 
 // 检查登录状态

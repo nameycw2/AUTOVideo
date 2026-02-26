@@ -6,6 +6,7 @@
 from datetime import datetime
 from typing import Optional, Union
 import os
+import re
 import asyncio
 import json
 
@@ -36,6 +37,7 @@ class XiaohongshuVideo(object):
         thumbnail_path: Optional[str] = None,
         action_delay: float = 0.3,
         account_id: Optional[int] = None,
+        description: str = '',
     ):
         title_str = (title or "").strip()
         if len(title_str) > XHS_TITLE_MAX_LENGTH:
@@ -43,8 +45,16 @@ class XiaohongshuVideo(object):
                 f"小红书标题最多{XHS_TITLE_MAX_LENGTH}个字符，当前{len(title_str)}字，请缩短后重试"
             )
         self.title = title_str or title
+        self.description = (description or "").strip()  # 用户输入的正文/描述
         self.file_path = file_path
-        self.tags = tags if isinstance(tags, list) else (tags.split(",") if tags else [])
+        # 确保 tags 为列表且每项为字符串，便于正文与话题填写
+        if isinstance(tags, list):
+            self.tags = [str(t).strip() for t in tags if t and str(t).strip()]
+        elif tags:
+            self.tags = [t.strip() for t in str(tags).split(",") if t.strip()]
+        else:
+            self.tags = []
+        self.tags = self.tags[:20]  # 小红书单条笔记话题数量限制
         self.publish_date = publish_date
         self.account_file = account_file
         self.account_id = account_id
@@ -53,7 +63,7 @@ class XiaohongshuVideo(object):
         self.local_executable_path = LOCAL_CHROME_PATH
         self.headless = LOCAL_CHROME_HEADLESS
         xiaohongshu_logger.info(
-            f"XiaohongshuVideo initialized - title: '{self.title}', tags: {self.tags}, account_id: {account_id}"
+            f"XiaohongshuVideo initialized - title: '{self.title}', description: {len(self.description)} chars, tags: {self.tags}, account_id: {account_id}"
         )
 
     async def _human_pause(self, multiplier: float = 1.0):
@@ -133,22 +143,91 @@ class XiaohongshuVideo(object):
             raise
         await self._human_pause(3)
 
-        # 等待视频上传完成（页面出现“重新上传”或进度消失等，按实际页面调整）
+        # 等待视频上传完成，且标题/正文编辑区出现
         for _ in range(120):
             await self._human_pause(1)
-            # 若存在“标题”或“描述”等编辑区域，认为进入编辑页
-            if await page.get_by_placeholder("填写标题").count() or await page.get_by_text("标题").count():
+            if await page.get_by_placeholder("填写标题").count() or await page.get_by_placeholder("填写标题会有更多赞哦").count():
+                break
+            if await page.get_by_text("标题").count():
                 break
             if await page.locator('text=重新上传').count():
                 break
         await self._human_pause(1)
 
-        # 填写标题
+        # 先等待并定位正文输入框（小红书为 TipTap 富文本：contenteditable + 内部 p[data-placeholder]）
+        body_input = None
+        try:
+            # 方式1：TipTap/ProseMirror 正文框 — div.contenteditable[role=textbox] 或 .tiptap.ProseMirror
+            for sel in [
+                'div[contenteditable="true"][role="textbox"]',
+                'div.tiptap.ProseMirror',
+                '.ProseMirror[contenteditable="true"]',
+            ]:
+                el = page.locator(sel).first
+                if await el.count():
+                    try:
+                        if await el.is_visible():
+                            body_input = el
+                            xiaohongshu_logger.info("  [-] 已通过 TipTap 正文框定位")
+                            break
+                    except Exception:
+                        pass
+                if body_input is not None:
+                    break
+            # 方式2：通过内部 p[data-placeholder*="输入正文描述"] 找到父级 contenteditable（TipTap 结构）
+            if body_input is None:
+                try:
+                    editable = page.locator('div[contenteditable="true"]').filter(
+                        has=page.locator('p[data-placeholder*="输入正文描述"]')
+                    ).first
+                    if await editable.count() and await editable.is_visible():
+                        body_input = editable
+                        xiaohongshu_logger.info("  [-] 已通过 data-placeholder 定位正文框")
+                except Exception:
+                    pass
+            # 方式3：通过「输入正文描述」文案所在区域找 contenteditable
+            if body_input is None:
+                hint = page.get_by_text("输入正文描述").first
+                if await hint.count():
+                    await hint.wait_for(state="visible", timeout=5000)
+                    for container in [hint.locator(".."), hint.locator("../.."), hint.locator("..").locator("..")]:
+                        el = container.locator("[contenteditable=true]").first
+                        if await el.count():
+                            try:
+                                if await el.is_visible():
+                                    body_input = el
+                                    break
+                            except Exception:
+                                pass
+                        if body_input is not None:
+                            break
+            # 方式4：placeholder 包含「输入正文描述」的输入框（普通 input/textarea）
+            if body_input is None:
+                for pattern in [re.compile(r"输入正文描述"), re.compile(r"正文")]:
+                    inp = page.get_by_placeholder(pattern).first
+                    if await inp.count():
+                        try:
+                            if await inp.is_visible():
+                                body_input = inp
+                                break
+                        except Exception:
+                            pass
+            # 方式5：页面上第二个 textarea
+            if body_input is None:
+                textareas = page.locator("textarea")
+                if await textareas.count() >= 2:
+                    body_input = textareas.nth(1)
+        except Exception as e:
+            xiaohongshu_logger.warning(f"  [-] 定位正文框时: {e}")
+
+        # 填写标题（占位符多为「填写标题会有更多赞哦」或「填写标题」）
         if self.title and self.title.strip():
             try:
-                title_input = page.get_by_placeholder("填写标题").first
-                if await title_input.count():
-                    await title_input.fill(self.title[:XHS_TITLE_MAX_LENGTH])
+                for placeholder in ["填写标题会有更多赞哦", "填写标题"]:
+                    title_input = page.get_by_placeholder(placeholder).first
+                    if await title_input.count():
+                        await title_input.fill(self.title[:XHS_TITLE_MAX_LENGTH])
+                        break
                 else:
                     title_label = page.get_by_text("标题").first
                     if await title_label.count():
@@ -158,17 +237,118 @@ class XiaohongshuVideo(object):
                 xiaohongshu_logger.warning(f"  [-] 填写标题失败: {e}")
         await self._human_pause(0.5)
 
-        # 填写描述/正文（小红书多为笔记正文）
+        # 填写描述/正文（小红书为笔记正文）：正文内容 + 话题标签（紧跟在后、无空格），如 1234#1#2
         try:
-            desc_placeholder = page.get_by_placeholder("填写正文").first
-            if await desc_placeholder.count():
-                desc_text = self.title
-                if self.tags:
-                    desc_text += " " + " ".join(["#" + t.strip() for t in self.tags if t and t.strip()])
-                await desc_placeholder.fill(desc_text[:1000])
-        except Exception:
-            pass
+            tag_part = ""
+            if self.tags:
+                tag_part = "".join(
+                    ("#" + str(t).strip() if not str(t).strip().startswith("#") else str(t).strip())
+                    for t in self.tags[:20]
+                    if t and str(t).strip()
+                )
+                xiaohongshu_logger.info(f"  [-] 将 {len(self.tags)} 个标签紧跟正文后写入: {tag_part[:80]}...")
+            # 正文内容 + 标签（无空格），例如：1234#1#2
+            body_content = (self.description or self.title or "").strip()
+            desc_text = (body_content + tag_part).strip()[:1000]
+            if not desc_text:
+                desc_text = (self.title or "").strip() + tag_part
+            desc_text = desc_text[:1000].strip()
+
+            filled = False
+            # 优先使用前面已定位的正文输入框
+            if body_input is not None:
+                try:
+                    await body_input.wait_for(state="visible", timeout=3000)
+                    await body_input.click()
+                    await self._human_pause(0.3)
+                    await body_input.fill(desc_text)
+                    filled = True
+                    xiaohongshu_logger.info("  [-] 已填写正文（含描述与话题）")
+                except Exception as e:
+                    xiaohongshu_logger.warning(f"  [-] 向已定位正文框填写失败: {e}")
+            if not filled:
+                await self._human_pause(0.5)
+                for placeholder in [
+                    "输入正文描述,真诚有价值的分享予人温暖",
+                    "输入正文描述",
+                    "填写正文",
+                    "添加正文",
+                    "请输入正文",
+                    "写正文",
+                    "正文",
+                ]:
+                    inp = page.get_by_placeholder(placeholder).first
+                    if await inp.count():
+                        try:
+                            await inp.wait_for(state="visible", timeout=3000)
+                            await inp.click()
+                            await self._human_pause(0.3)
+                            await inp.fill(desc_text)
+                            filled = True
+                            xiaohongshu_logger.info("  [-] 已填写正文（含描述与话题）")
+                            break
+                        except Exception:
+                            pass
+            if not filled:
+                # 通过「正文」文案找相邻的 textarea 或 contenteditable
+                desc_label = page.get_by_text("正文").first
+                if await desc_label.count():
+                    parent = desc_label.locator("..")
+                    for sel in ["textarea", "[contenteditable=true]", "input[type=text]"]:
+                        el = parent.locator(sel).first
+                        if await el.count():
+                            try:
+                                await el.wait_for(state="visible", timeout=2000)
+                                await el.click()
+                                await self._human_pause(0.3)
+                                await el.fill(desc_text)
+                                filled = True
+                                xiaohongshu_logger.info("  [-] 已通过正文区域填写（含话题）")
+                                break
+                            except Exception:
+                                pass
+                    if not filled:
+                        grand = desc_label.locator("../..")
+                        textarea = grand.locator("textarea, [contenteditable=true]").first
+                        if await textarea.count():
+                            try:
+                                await textarea.click()
+                                await self._human_pause(0.3)
+                                await textarea.fill(desc_text)
+                                filled = True
+                                xiaohongshu_logger.info("  [-] 已通过正文区域填写（含话题）")
+                            except Exception:
+                                pass
+            if not filled:
+                # 发布页内若有多个 textarea，第二个多为正文
+                textareas = page.locator("textarea")
+                n = await textareas.count()
+                if n >= 2:
+                    try:
+                        second = textareas.nth(1)
+                        await second.wait_for(state="visible", timeout=2000)
+                        await second.click()
+                        await self._human_pause(0.3)
+                        await second.fill(desc_text)
+                        xiaohongshu_logger.info("  [-] 已通过正文 textarea 填写（含话题）")
+                    except Exception:
+                        pass
+                elif n == 1:
+                    try:
+                        first = textareas.first
+                        await first.click()
+                        await self._human_pause(0.3)
+                        await first.fill(desc_text)
+                        xiaohongshu_logger.info("  [-] 已通过 textarea 填写正文（含话题）")
+                    except Exception:
+                        pass
+            if not filled:
+                xiaohongshu_logger.warning("  [-] 未找到正文输入框，正文与标签可能未填充")
+        except Exception as e:
+            xiaohongshu_logger.warning(f"  [-] 填写正文/话题时出错: {e}")
         await self._human_pause(0.5)
+
+        # 小红书发布时不处理封面（封面由平台从视频帧生成，无需操作）
 
         # 定时发布（若有）
         if self.publish_date and isinstance(self.publish_date, datetime):

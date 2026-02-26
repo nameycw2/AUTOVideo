@@ -108,6 +108,14 @@
             <el-option label="微信视频号" value="weixin" />
             <el-option label="TikTok" value="tiktok" />
           </el-select>
+          <el-alert
+            v-if="platformRulesTip"
+            :title="platformRulesTip.title"
+            :description="platformRulesTip.description"
+            :type="platformRulesTip.type"
+            show-icon
+            style="margin-top: 8px;"
+          />
         </el-form-item>
         <el-form-item label="关联商家">
           <el-select v-model="form.merchant_id" placeholder="请选择商家" clearable style="width: 100%;">
@@ -292,6 +300,40 @@ const getPlatformText = (platform) => {
   }
   return map[platform] || platform
 }
+
+// 与立即发布一致的平台规则提示（标题/标签/正文等）
+const platformRulesTip = computed(() => {
+  const p = form.value.platform
+  if (!p) return null
+  const tips = {
+    douyin: {
+      title: '抖音发布规则',
+      description: '标题最多 100 字；话题标签最多 5 个。',
+      type: 'info'
+    },
+    xiaohongshu: {
+      title: '小红书发布规则',
+      description: '标题最多 20 个字符；正文+话题（#标签紧跟正文后，如 1234#话题1#话题2）；话题最多 20 个；封面由平台从视频帧生成。',
+      type: 'warning'
+    },
+    weixin: {
+      title: '微信视频号发布规则',
+      description: '短标题 6-16 个字，符号仅支持书名号《》、引号""、冒号：、加号+、问号?、百分号%、摄氏度°，逗号可用空格代替；视频描述（正文）+ #话题；话题最多 10 个。',
+      type: 'info'
+    },
+    kuaishou: {
+      title: '快手发布规则',
+      description: '标题最多 100 字；话题标签最多 10 个。',
+      type: 'info'
+    },
+    tiktok: {
+      title: 'TikTok 发布规则',
+      description: '标题与描述按平台要求；话题最多 10 个。',
+      type: 'info'
+    }
+  }
+  return tips[p] || null
+})
 
 const getDistributionModeText = (mode) => {
   const map = {

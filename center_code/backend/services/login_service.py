@@ -88,6 +88,8 @@ async def start_login_session(account_id: int, platform: str = 'douyin') -> Dict
             login_url = 'https://channels.weixin.qq.com/login.html'
         elif platform == 'tiktok':
             login_url = 'https://www.tiktok.com/upload'
+        elif platform == 'kuaishou':
+            login_url = 'https://cp.kuaishou.com/'
         else:
             login_url = 'https://creator.douyin.com/'  # 默认抖音
         
@@ -106,15 +108,35 @@ async def start_login_session(account_id: int, platform: str = 'douyin') -> Dict
         # 额外等待页面渲染
         await asyncio.sleep(3)
         
-        # 尝试点击"扫码登录"按钮
+        # 快手：先点击「立即登录」进入登录页，才会出现扫码二维码
+        if platform == 'kuaishou':
+            try:
+                login_now_btn = page.get_by_text("立即登录").first
+                if await login_now_btn.count():
+                    await login_now_btn.click(timeout=5000)
+                    await asyncio.sleep(2)
+                    print("已点击「立即登录」，等待扫码页面出现")
+                else:
+                    login_now_btn = page.get_by_role("button", name="立即登录").first
+                    if await login_now_btn.count():
+                        await login_now_btn.click(timeout=5000)
+                        await asyncio.sleep(2)
+                        print("已点击「立即登录」按钮，等待扫码页面出现")
+            except Exception as e:
+                print(f"点击「立即登录」失败（可能已在登录页）: {e}")
+        
+        # 尝试点击"扫码登录"按钮（按平台使用不同文案）
         try:
-            # 查找扫码登录按钮，使用更安全的方式
             qr_button_selectors = [
                 'text=扫码登录',
                 'button:has-text("扫码登录")',
                 '[class*="qr"]',
                 '[class*="scan"]'
             ]
+            if platform == 'weixin':
+                qr_button_selectors = ['text=微信扫码登录', 'text=扫码登录', 'button:has-text("扫码登录")'] + qr_button_selectors
+            elif platform == 'kuaishou':
+                qr_button_selectors = ['text=快手扫码登录', 'text=扫码登录', 'button:has-text("扫码登录")'] + qr_button_selectors
             
             clicked = False
             for selector in qr_button_selectors:
@@ -244,7 +266,8 @@ async def check_login_status(account_id: int) -> Dict:
         url_upload = 'creator.xiaohongshu.com/publish/publish'
         url_login_check = lambda u: 'login' not in u.lower()
     elif platform == 'weixin':
-        key_cookies_list = ['wxtoken', 'wxuin', 'MM_WX_NOTIFY_STATE']
+        # 视频号助手可能使用多种 cookie 名称，任一存在或不在登录页即视为已登录
+        key_cookies_list = ['wxtoken', 'wxuin', 'MM_WX_NOTIFY_STATE', 'token', 'wx_open_id', 'app_openid']
         url_creator = 'channels.weixin.qq.com'
         url_upload = 'channels.weixin.qq.com'
         url_login_check = lambda u: 'login' not in u.lower()
@@ -253,6 +276,11 @@ async def check_login_status(account_id: int) -> Dict:
         url_creator = 'tiktok.com'
         url_upload = 'tiktok.com/upload'
         url_login_check = lambda u: 'login' not in u.lower()
+    elif platform == 'kuaishou':
+        key_cookies_list = ['userId', 'kuaishou.logged.in', 'did', 'token', 'clientid']
+        url_creator = 'cp.kuaishou.com'
+        url_upload = 'cp.kuaishou.com'
+        url_login_check = lambda u: 'passport' not in u.lower() and 'login' not in u.lower()
     else:
         key_cookies_list = ['sessionid', 'passport_auth', 'sid_guard', 'passport_csrf_token', 'sid_tt']
         url_creator = 'creator.douyin.com'
@@ -268,6 +296,31 @@ async def check_login_status(account_id: int) -> Dict:
             if cookies:
                 cookie_names = [c.get('name', '') for c in cookies]
                 has_key_cookie = any(name in cookie_names for name in key_cookies_list)
+                
+                # 微信视频号：只要不在登录页且有本域 cookie 也可视为已登录
+                if platform == 'weixin' and not has_key_cookie:
+                    weixin_domain_cookies = [c for c in cookies if isinstance(c, dict) and 'weixin.qq.com' in c.get('domain', '')]
+                    if weixin_domain_cookies:
+                        has_key_cookie = True
+                # 快手：只要不在登录页且有本域 cookie 也可视为已登录
+                if platform == 'kuaishou' and not has_key_cookie:
+                    kuaishou_domain_cookies = [c for c in cookies if isinstance(c, dict) and 'kuaishou.com' in c.get('domain', '')]
+                    if kuaishou_domain_cookies:
+                        has_key_cookie = True
+                
+                # 重要：若仍显示「立即登录」「扫码登录」等，说明还在登录页，不能判为已登录（避免未扫码就跳转成功）
+                if has_key_cookie and platform in ('weixin', 'kuaishou'):
+                    try:
+                        if await page.get_by_text("立即登录").count() > 0:
+                            has_key_cookie = False
+                        if await page.get_by_text("扫码登录").count() > 0:
+                            has_key_cookie = False
+                        if platform == 'kuaishou' and await page.get_by_text("快手扫码登录").count() > 0:
+                            has_key_cookie = False
+                        if platform == 'weixin' and await page.get_by_text("微信扫码登录").count() > 0:
+                            has_key_cookie = False
+                    except Exception:
+                        pass
                 
                 if has_key_cookie:
                     try:
@@ -292,24 +345,34 @@ async def check_login_status(account_id: int) -> Dict:
         except Exception as e:
             print(f"获取cookies失败: {e}")
         
-        try:
-            await page.wait_for_load_state('domcontentloaded', timeout=3000)
-        except:
-            pass
-        
+        # 仅读取当前页面状态，不做 wait_for_load_state 等操作，避免轮询时干扰页面导致二维码刷新/失效
         try:
             current_url = page.url
             
             if url_upload in current_url:
                 try:
-                    storage_state = await context.storage_state()
-                    session['status'] = 'logged_in'
-                    session['cookies'] = storage_state
-                    return {
-                        'status': 'logged_in',
-                        'cookies': storage_state,
-                        'message': '登录成功'
-                    }
+                    # 微信/快手：若页面仍显示「立即登录」「扫码登录」，说明未真正登录，不返回成功
+                    if platform in ('weixin', 'kuaishou'):
+                        if await page.get_by_text("立即登录").count() > 0 or await page.get_by_text("扫码登录").count() > 0:
+                            pass  # 不返回 logged_in，继续后续判断
+                        elif platform == 'kuaishou' and await page.get_by_text("快手扫码登录").count() > 0:
+                            pass
+                        elif platform == 'weixin' and await page.get_by_text("微信扫码登录").count() > 0:
+                            pass
+                        else:
+                            storage_state = await context.storage_state()
+                            session['status'] = 'logged_in'
+                            session['cookies'] = storage_state
+                            return {'status': 'logged_in', 'cookies': storage_state, 'message': '登录成功'}
+                    else:
+                        storage_state = await context.storage_state()
+                        session['status'] = 'logged_in'
+                        session['cookies'] = storage_state
+                        return {
+                            'status': 'logged_in',
+                            'cookies': storage_state,
+                            'message': '登录成功'
+                        }
                 except Exception as e:
                     print(f"获取cookies失败: {e}")
             
@@ -347,6 +410,22 @@ async def check_login_status(account_id: int) -> Dict:
                 login_text_count += await qr_login_locator.count()
         except Exception as e:
             print(f"检查'扫码登录'文本失败: {e}")
+        
+        try:
+            if platform == 'weixin':
+                weixin_qr_locator = page.get_by_text('微信扫码登录')
+                if weixin_qr_locator:
+                    login_text_count += await weixin_qr_locator.count()
+        except Exception as e:
+            print(f"检查'微信扫码登录'文本失败: {e}")
+        
+        try:
+            if platform == 'kuaishou':
+                ks_qr_locator = page.get_by_text('快手扫码登录')
+                if ks_qr_locator:
+                    login_text_count += await ks_qr_locator.count()
+        except Exception as e:
+            print(f"检查'快手扫码登录'文本失败: {e}")
         
         if login_text_count > 0:
             # 还在登录页面

@@ -123,13 +123,16 @@ def upload_thumbnail():
         if file.filename == '':
             return response_error('No file selected', 400)
         
-        # 检查文件类型
-        allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
-        filename = secure_filename(file.filename)
+        # 检查文件类型（封面图）
+        allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic', '.heif'}
+        filename = secure_filename(file.filename) or 'cover'
         file_ext = os.path.splitext(filename)[1].lower()
-        
+        # 无扩展名时根据 Content-Type 补全，避免本地上传「封面」等文件名被拒
+        if not file_ext and file.content_type and (file.content_type.startswith('image/') or file.content_type == 'application/octet-stream'):
+            file_ext = '.jpg'
+            filename = filename + file_ext
         if file_ext not in allowed_extensions:
-            return response_error(f'File type not allowed. Allowed types: {", ".join(allowed_extensions)}', 400)
+            return response_error(f'File type not allowed. Allowed types: {", ".join(sorted(allowed_extensions))}', 400)
         
         # 检查文件大小（限制为5MB）
         file.seek(0, os.SEEK_END)
@@ -321,6 +324,7 @@ def submit_publish():
                     device_id=account.device_id,
                     video_url=final_video_url,
                     video_title=video_title,
+                    video_description=video_description,
                     video_tags=video_tags_json,
                     publish_date=task_publish_date,
                     thumbnail_url=final_thumbnail_url,

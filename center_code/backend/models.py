@@ -96,6 +96,7 @@ class VideoTask(Base):
     device_id = Column(Integer, ForeignKey('devices.id'), nullable=False)
     video_url = Column(String(1000), nullable=False)
     video_title = Column(String(500))
+    video_description = Column(Text)  # 正文/描述，与 video_title、video_tags 一起用于发布
     video_tags = Column(String(500))
     publish_date = Column(DateTime)
     thumbnail_url = Column(String(1000))

@@ -66,12 +66,14 @@ async def douyin_cookie_gen(account_file):
 
 class DouYinVideo(object):
     def __init__(self, title, file_path, tags, publish_date, account_file, thumbnail_path=None,
-                 action_delay: float = 0.3, final_display_delay: float = 100.0, account_id: int = None):
+                 action_delay: float = 0.3, final_display_delay: float = 100.0, account_id: int = None, description: str = ''):
         self.title = title  # 视频标题
+        self.description = (description or "").strip()  # 正文/描述，填入作品简介
         self.file_path = file_path
-        self.tags = tags if isinstance(tags, list) else (tags.split(',') if tags else [])  # 确保tags是列表
+        self.tags = tags if isinstance(tags, list) else (tags.split(',') if tags else [])
+        self.tags = [t.strip() for t in self.tags if t and str(t).strip()][:5]  # 抖音最多 5 个话题
         # 记录日志，确保title和tags正确接收
-        douyin_logger.info(f"DouYinVideo initialized - title: '{self.title}', tags: {self.tags}, account_id: {account_id}")
+        douyin_logger.info(f"DouYinVideo initialized - title: '{self.title}', description: {len(self.description)} chars, tags: {self.tags}, account_id: {account_id}")
         self.publish_date = publish_date
         self.account_file = account_file
         self.account_id = account_id  # 账号ID，用于从数据库获取和更新cookies
@@ -388,20 +390,22 @@ class DouYinVideo(object):
                 except:
                     print("  [-] 超时未进入视频发布页面，重新尝试...")
                     await asyncio.sleep(0.5)  # 等待 0.5 秒后重新尝试
-        # 填充标题和话题
-        # 检查是否存在包含输入框的元素
-        # 这里为了避免页面变化，故使用相对位置定位：作品标题父级右侧第一个元素的input子元素
+        # 填充标题和话题（若用户填写了正文描述，则标题框填充「标题。描述」）
         await self._human_pause(1.5)
+        title_text = (self.title or "").strip()
+        if self.description:
+            title_text = (title_text + "。" + self.description.strip()).strip()
+        title_text = title_text[:100]  # 抖音标题框长度限制
         douyin_logger.info(f'  [-] 正在填充标题和话题...')
-        douyin_logger.info(f'  [-] 标题内容: "{self.title}"')
+        douyin_logger.info(f'  [-] 标题内容: "{title_text[:50]}{"..." if len(title_text) > 50 else ""}"')
         douyin_logger.info(f'  [-] 标签列表: {self.tags}')
         
-        # 先填充标题（确保标题不为空）
-        if self.title and self.title.strip():
+        # 先填充标题（标题+句号+描述，若有描述）
+        if title_text:
             title_container = page.get_by_text('作品标题').locator("..").locator("xpath=following-sibling::div[1]").locator("input")
             if await title_container.count():
-                await title_container.fill(self.title[:30])
-                douyin_logger.info(f'  [-] 已填充标题到输入框: "{self.title[:30]}"')
+                await title_container.fill(title_text)
+                douyin_logger.info(f'  [-] 已填充标题到输入框（含描述）: "{title_text[:50]}..."')
                 await self._human_pause()
             else:
                 titlecontainer = page.locator(".notranslate")
@@ -413,14 +417,14 @@ class DouYinVideo(object):
                 await self._human_pause()
                 await page.keyboard.press("Delete")
                 await self._human_pause()
-                await page.keyboard.type(self.title)
+                await page.keyboard.type(title_text)
                 await page.keyboard.press("Enter")
-                douyin_logger.info(f'  [-] 已通过键盘输入标题: "{self.title}"')
+                douyin_logger.info(f'  [-] 已通过键盘输入标题（含描述）: "{title_text[:50]}..."')
                 await self._human_pause()
         else:
             douyin_logger.warning('  [-] 标题为空，跳过标题填充')
         
-        # 再填充标签（确保标签是列表且不为空）
+        # 抖音当前页若另有作品简介输入框，可在此补充；主内容已合并到标题
         if self.tags and isinstance(self.tags, list) and len(self.tags) > 0:
             css_selector = ".zone-container"
             for index, tag in enumerate(self.tags, start=1):

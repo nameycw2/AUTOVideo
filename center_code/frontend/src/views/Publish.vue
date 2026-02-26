@@ -280,13 +280,16 @@
             <el-form-item label="视频标题" required>
               <el-input
                 v-model="form.video_title"
-                :placeholder="hasXiaohongshuAccount ? '请输入视频标题（小红书最多20字）' : '请输入视频标题'"
+                :placeholder="titlePlaceholder"
                 :maxlength="titleMaxLength"
                 show-word-limit
                 clearable
               />
               <el-text v-if="hasXiaohongshuAccount" type="warning" size="small" style="margin-top: 4px; display: block;">
                 已选小红书账号：标题最多 20 个字符，超出将无法发布
+              </el-text>
+              <el-text v-if="hasWeixinAccount" type="info" size="small" style="margin-top: 4px; display: block;">
+                已选微信视频号：短标题 6-16 个字，符号仅支持书名号《》、引号""、冒号：、加号+、问号?、百分号%、摄氏度°，逗号可用空格代替
               </el-text>
             </el-form-item>
             <el-form-item label="视频描述">
@@ -306,7 +309,7 @@
                 filterable
                 allow-create
                 default-first-option
-                placeholder="选择或输入标签（最多10个）"
+                :placeholder="`选择或输入标签（最多${maxTagCount}个）`"
                 style="width: 100%;"
                 :max-collapse-tags="3"
                 collapse-tags
@@ -331,8 +334,8 @@
                   {{ tag }}
                 </el-tag>
               </div>
-              <div v-if="form.video_tags_array && form.video_tags_array.length >= 10" style="margin-top: 5px;">
-                <el-text type="warning" size="small">最多只能添加10个标签</el-text>
+              <div v-if="form.video_tags_array && form.video_tags_array.length >= maxTagCount" style="margin-top: 5px;">
+                <el-text type="warning" size="small">最多只能添加 {{ maxTagCount }} 个标签</el-text>
               </div>
             </el-form-item>
             <el-form-item label="封面图片">
@@ -352,7 +355,7 @@
                     上传封面图片
                   </el-button>
                   <template #tip>
-                    <div class="el-upload__tip">支持 jpg、png、gif 格式，文件大小不超过 5MB</div>
+                    <div class="el-upload__tip">支持 jpg、png、gif、webp、bmp、heic，文件大小不超过 5MB</div>
                   </template>
                 </el-upload>
                 <el-input
@@ -525,6 +528,15 @@ const uploadHeaders = computed(() => {
   return headers
 })
 
+// 各平台视频标签数量上限（与后端 PLATFORM_TAG_LIMITS 一致）
+const TAG_LIMITS = {
+  douyin: 5,   // 抖音最多 5 个话题
+  xiaohongshu: 20,
+  weixin: 10,
+  tiktok: 10,
+  kuaishou: 10
+}
+
 const getPlatformText = (platform) => {
   const map = {
     'douyin': '抖音',
@@ -541,7 +553,40 @@ const hasXiaohongshuAccount = computed(() => {
   if (!form.value.account_ids?.length) return false
   return form.value.account_ids.some(id => accounts.value.find(a => a.id === id)?.platform === 'xiaohongshu')
 })
+// 是否已选微信视频号（短标题 6-16 字，符号仅支持书名号、引号、冒号、加号、问号、百分号、摄氏度，逗号可用空格代替）
+const hasWeixinAccount = computed(() => {
+  if (!form.value.account_ids?.length) return false
+  return form.value.account_ids.some(id => accounts.value.find(a => a.id === id)?.platform === 'weixin')
+})
+
+const titlePlaceholder = computed(() => {
+  if (hasXiaohongshuAccount.value && hasWeixinAccount.value) return '请输入视频标题（小红书最多20字；微信短标题6-16字、仅支持指定符号）'
+  if (hasXiaohongshuAccount.value) return '请输入视频标题（小红书最多20字）'
+  if (hasWeixinAccount.value) return '请输入视频标题（微信短标题 6-16 字，符号仅支持书名号、引号、冒号、加号、问号、百分号、摄氏度，逗号可用空格代替）'
+  return '请输入视频标题'
+})
+
 const titleMaxLength = computed(() => (hasXiaohongshuAccount.value ? 20 : 100))
+
+// 微信视频号短标题校验：6-16 字，符号仅支持书名号、引号、冒号、加号、问号、百分号、摄氏度，逗号用空格代替
+function weixinShortTitleValidate(title) {
+  if (!title || typeof title !== 'string') return { valid: false, message: '请输入视频标题' }
+  const s = title.replace(/[，,]/g, ' ').replace(/[^\u4e00-\u9fffA-Za-z0-9《》""「」『』：:\+?%°\s]/g, '').replace(/\s+/g, ' ').trim()
+  if (s.length < 6) return { valid: false, message: '微信短标题至少 6 个字' }
+  if (s.length > 16) return { valid: false, message: '微信短标题最多 16 个字' }
+  return { valid: true }
+}
+
+// 根据已选账号平台取标签数量上限（多平台取最小值，未选账号默认 10）
+const maxTagCount = computed(() => {
+  if (!form.value.account_ids?.length) return 10
+  const platforms = form.value.account_ids
+    .map(id => accounts.value.find(a => a.id === id)?.platform)
+    .filter(Boolean)
+  if (!platforms.length) return 10
+  const limits = platforms.map(p => TAG_LIMITS[p] ?? 10)
+  return Math.min(...limits)
+})
 
 const getStatusType = (status) => {
   const map = {
@@ -783,6 +828,11 @@ const handleAccountChange = (selectedIds) => {
     // 移除未登录的账号
     form.value.account_ids = selectedIds.filter(id => !invalidAccounts.includes(id))
   }
+  // 已选平台标签上限变化时，若当前标签数超过新上限则自动截断
+  if (form.value.video_tags_array?.length > maxTagCount.value) {
+    form.value.video_tags_array = form.value.video_tags_array.slice(0, maxTagCount.value)
+    ElMessage.warning(`当前已选平台最多支持 ${maxTagCount.value} 个标签，已自动截断`)
+  }
 }
 
 // 移除单个账号
@@ -799,14 +849,17 @@ const removeTag = (index) => {
 
 // 标签变化处理
 const handleTagsChange = (tags) => {
-  // 限制最多10个标签
-  if (tags && tags.length > 10) {
-    form.value.video_tags_array = tags.slice(0, 10)
-    ElMessage.warning('最多只能添加10个标签')
+  const max = maxTagCount.value
+  if (tags && tags.length > max) {
+    form.value.video_tags_array = tags.slice(0, max)
+    ElMessage.warning(`最多只能添加 ${max} 个标签`)
   }
   // 去除重复标签
   if (tags && tags.length > 0) {
-    form.value.video_tags_array = [...new Set(tags)]
+    form.value.video_tags_array = [...new Set(form.value.video_tags_array || tags)]
+    if (form.value.video_tags_array.length > max) {
+      form.value.video_tags_array = form.value.video_tags_array.slice(0, max)
+    }
   }
 }
 
@@ -910,13 +963,13 @@ const clearVideo = () => {
   form.value.video_id = null
 }
 
-// 封面图片上传前验证
+// 封面图片上传前验证（与后端允许类型一致：含 heic/heif，无扩展名由后端按 Content-Type 处理）
 const beforeThumbnailUpload = (file) => {
-  const isImage = /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(file.name)
+  const isImage = /\.(jpg|jpeg|png|gif|webp|bmp|heic|heif)$/i.test(file.name) || (file.type && file.type.startsWith('image/'))
   const isLt5M = file.size / 1024 / 1024 < 5
 
   if (!isImage) {
-    ElMessage.error('只能上传图片文件!')
+    ElMessage.error('请上传图片文件（支持 jpg、png、gif、webp、bmp、heic）')
     return false
   }
   if (!isLt5M) {
@@ -1057,6 +1110,14 @@ const nextStep = () => {
       ElMessage.warning(hasXiaohongshuAccount.value ? '小红书标题最多20个字符，请缩短标题' : '视频标题不能超过100个字符')
       return
     }
+    // 已选微信视频号时，短标题须符合 6-16 字及允许符号
+    if (hasWeixinAccount.value) {
+      const result = weixinShortTitleValidate(form.value.video_title)
+      if (!result.valid) {
+        ElMessage.warning(result.message || '短标题 6-16 字，符号仅支持书名号、引号、冒号、加号、问号、百分号、摄氏度，逗号用空格代替')
+        return
+      }
+    }
     if (form.value.video_description && form.value.video_description.length > 500) {
       ElMessage.warning('视频描述不能超过500个字符')
       return
@@ -1090,6 +1151,13 @@ const handleSubmit = async () => {
   if (form.value.video_title.length > maxLen) {
     ElMessage.warning(hasXiaohongshuAccount.value ? '小红书标题最多20个字符，请缩短后重试' : '视频标题不能超过100个字符')
     return
+  }
+  if (hasWeixinAccount.value) {
+    const result = weixinShortTitleValidate(form.value.video_title)
+    if (!result.valid) {
+      ElMessage.warning(result.message || '短标题须 6-16 字，符号仅支持书名号、引号、冒号、加号、问号、百分号、摄氏度，逗号用空格代替')
+      return
+    }
   }
 
   try {

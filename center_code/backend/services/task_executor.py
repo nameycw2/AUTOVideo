@@ -49,6 +49,20 @@ except ImportError as e:
 # 格式: {account_id: {'thread': thread, 'playwright': playwright, 'browser': browser, 'context': context, 'page': page, 'stop_event': event}}
 _listening_tasks = {}
 
+# 小红书/抖音多账号发布时串行执行，避免多浏览器实例冲突
+_xiaohongshu_upload_lock = threading.Lock()
+_douyin_upload_lock = threading.Lock()
+_kuaishou_upload_lock = threading.Lock()
+
+# 各平台视频标签数量上限（与前端、各 uploader 保持一致）
+PLATFORM_TAG_LIMITS = {
+    'douyin': 5,       # 抖音最多 5 个话题
+    'xiaohongshu': 20,
+    'weixin': 10,
+    'tiktok': 10,
+    'kuaishou': 10,
+}
+
 
 def get_account_from_db(account_id: int, db: Session) -> Optional[Dict]:
     """
@@ -173,6 +187,9 @@ def save_cookies_to_temp(cookies_data: Dict, account_id: Optional[int] = None) -
                     if 'tiktok.com' in domain:
                         domains.add(f"https://{domain}")
                         domains.add("https://www.tiktok.com")
+                    if 'kuaishou.com' in domain:
+                        domains.add(f"https://{domain}")
+                        domains.add("https://cp.kuaishou.com")
             for domain in domains:
                 cookies_data['origins'].append({
                     'origin': domain,
@@ -293,7 +310,10 @@ async def execute_video_upload(task_id: int):
             if platform == 'xiaohongshu':
                 important_cookies = ['web_session', 'a1', 'webId', 'gid']
             elif platform == 'weixin':
-                important_cookies = ['wxtoken', 'wxuin', 'MM_WX_NOTIFY_STATE']
+                # 视频号助手 cookie 名称可能多样，与 login_service 保持一致
+                important_cookies = ['wxtoken', 'wxuin', 'MM_WX_NOTIFY_STATE', 'token', 'wx_open_id', 'app_openid']
+            elif platform == 'kuaishou':
+                important_cookies = ['userId', 'kuaishou.logged.in', 'did', 'token', 'clientid']
             elif platform == 'tiktok':
                 important_cookies = ['sessionid', 'sid_tt', 'tt_chain_token']
             else:
@@ -369,6 +389,16 @@ async def execute_video_upload(task_id: int):
                         tags = [tag.strip() for tag in task.video_tags.split(',') if tag.strip()]
                 elif isinstance(task.video_tags, list):
                     tags = task.video_tags
+            # 确保为字符串列表并按平台数量上限截断
+            if isinstance(tags, list):
+                tags = [str(t).strip() for t in tags if t and str(t).strip()]
+            else:
+                tags = []
+            limit = PLATFORM_TAG_LIMITS.get(platform, 10)
+            if len(tags) > limit:
+                if douyin_logger:
+                    douyin_logger.info(f"标签数量 {len(tags)} 超过 {platform} 上限 {limit}，已截断为前 {limit} 个")
+                tags = tags[:limit]
             
             # 处理视频URL（可能是file://路径、http URL或本地路径）
             video_path = task.video_url
@@ -447,24 +477,100 @@ async def execute_video_upload(task_id: int):
                 
                 return
             
-            # 执行上传
+            # 封面图：上传器需要本地路径，若 thumbnail_url 是 HTTP 或 /uploads/ 则转为本地路径
+            thumbnail_path_to_use = None
+            temp_thumbnail_file = None
+            if task.thumbnail_url and str(task.thumbnail_url).strip():
+                raw = str(task.thumbnail_url).strip()
+                if raw.startswith('http://') or raw.startswith('https://'):
+                    try:
+                        if douyin_logger:
+                            douyin_logger.info(f"Downloading thumbnail from URL: {raw[:80]}...")
+                        resp = requests.get(raw, stream=True, timeout=30)
+                        resp.raise_for_status()
+                        ext = '.jpg'
+                        for e in ['.png', '.jpeg', '.gif', '.webp']:
+                            if e in raw.lower():
+                                ext = e
+                                break
+                        temp_thumbnail_file = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+                        for chunk in resp.iter_content(chunk_size=8192):
+                            temp_thumbnail_file.write(chunk)
+                        temp_thumbnail_file.close()
+                        thumbnail_path_to_use = temp_thumbnail_file.name
+                        if douyin_logger:
+                            douyin_logger.info(f"Thumbnail downloaded to: {thumbnail_path_to_use}")
+                    except Exception as e:
+                        if douyin_logger:
+                            douyin_logger.warning(f"Failed to download thumbnail from URL, skipping cover: {e}")
+                elif raw.startswith('/'):
+                    backend_dir = Path(__file__).parent.parent
+                    if raw.startswith('/uploads/'):
+                        uploads_path = backend_dir.parent / 'uploads'
+                        thumb_rel = raw[len('/uploads/'):].lstrip('/')  # thumbnails/xxx.jpg
+                        full_thumb = uploads_path / thumb_rel
+                        if full_thumb.exists():
+                            thumbnail_path_to_use = str(full_thumb)
+                    else:
+                        full_thumb = backend_dir / raw.lstrip('/')
+                        if full_thumb.exists():
+                            thumbnail_path_to_use = str(full_thumb)
+                else:
+                    if os.path.exists(raw):
+                        thumbnail_path_to_use = os.path.abspath(raw)
+            
+            # 执行上传（小红书/抖音多账号时串行执行，避免多浏览器冲突）
             if douyin_logger:
                 douyin_logger.info(f"Starting upload: title={task.video_title}, video_path={video_path}, tags={tags}")
-            
-            # 执行上传
             if douyin_logger:
                 douyin_logger.info(f"开始执行视频上传任务 {task_id}...")
             
-            updated_cookies = await execute_upload(
-                task.video_title or '',
-                video_path,  # 使用处理后的路径
-                tags,
-                task.publish_date,
-                account_file,
-                task.thumbnail_url,
-                task.account_id,
-                platform=platform
-            )
+            if platform == 'xiaohongshu':
+                _xiaohongshu_upload_lock.acquire()
+                if douyin_logger:
+                    douyin_logger.info(f"小红书任务 {task_id} 已获取上传锁，开始执行（多账号串行）")
+            elif platform == 'douyin':
+                _douyin_upload_lock.acquire()
+                if douyin_logger:
+                    douyin_logger.info(f"抖音任务 {task_id} 已获取上传锁，开始执行（多账号串行）")
+            elif platform == 'kuaishou':
+                _kuaishou_upload_lock.acquire()
+                if douyin_logger:
+                    douyin_logger.info(f"快手任务 {task_id} 已获取上传锁，开始执行（多账号串行）")
+            try:
+                updated_cookies = await execute_upload(
+                    task.video_title or '',
+                    video_path,  # 使用处理后的路径
+                    tags,
+                    task.publish_date,
+                    account_file,
+                    thumbnail_path_to_use if thumbnail_path_to_use else None,  # 使用本地路径，避免 URL 导致上传器失败
+                    task.account_id,
+                    platform=platform,
+                    description=task.video_description or ''
+                )
+            finally:
+                if platform == 'xiaohongshu':
+                    try:
+                        _xiaohongshu_upload_lock.release()
+                        if douyin_logger:
+                            douyin_logger.info(f"小红书任务 {task_id} 已释放上传锁")
+                    except Exception:
+                        pass
+                elif platform == 'douyin':
+                    try:
+                        _douyin_upload_lock.release()
+                        if douyin_logger:
+                            douyin_logger.info(f"抖音任务 {task_id} 已释放上传锁")
+                    except Exception:
+                        pass
+                elif platform == 'kuaishou':
+                    try:
+                        _kuaishou_upload_lock.release()
+                        if douyin_logger:
+                            douyin_logger.info(f"快手任务 {task_id} 已释放上传锁")
+                    except Exception:
+                        pass
             
             # 明确记录从 uploader 返回的结果
             print(f"[TASK STATUS] 任务 {task_id} 的视频上传已完成，收到返回结果: {type(updated_cookies).__name__}")
@@ -692,21 +798,14 @@ async def execute_video_upload(task_id: int):
                     os.remove(account_file)
                 if 'temp_video_file' in locals() and temp_video_file and os.path.exists(temp_video_file.name):
                     os.remove(temp_video_file.name)
-            except:
-                pass
-            
-            # 清理临时文件（即使失败也要清理）
-            try:
-                if 'account_file' in locals() and os.path.exists(account_file):
-                    os.remove(account_file)
-                if 'temp_video_file' in locals() and temp_video_file and os.path.exists(temp_video_file.name):
-                    os.remove(temp_video_file.name)
+                if 'temp_thumbnail_file' in locals() and temp_thumbnail_file and os.path.exists(temp_thumbnail_file.name):
+                    os.remove(temp_thumbnail_file.name)
             except:
                 pass
 
 
-async def execute_upload(title: str, file_path: str, tags: list, publish_date, account_file: str, thumbnail_path: str = None, account_id: int = None, platform: str = 'douyin'):
-    """执行视频上传，按平台分发到对应上传器"""
+async def execute_upload(title: str, file_path: str, tags: list, publish_date, account_file: str, thumbnail_path: str = None, account_id: int = None, platform: str = 'douyin', description: str = ''):
+    """执行视频上传，按平台分发到对应上传器。description 为正文/描述，用于小红书等平台。"""
     try:
         if platform == 'xiaohongshu':
             try:
@@ -722,7 +821,8 @@ async def execute_upload(title: str, file_path: str, tags: list, publish_date, a
                 publish_date=publish_date,
                 account_file=account_file,
                 thumbnail_path=thumbnail_path,
-                account_id=account_id
+                account_id=account_id,
+                description=description or ''
             )
             print(f"[UPLOAD] 开始调用 XiaohongshuVideo.main() 执行视频上传...")
             if douyin_logger:
@@ -741,7 +841,8 @@ async def execute_upload(title: str, file_path: str, tags: list, publish_date, a
                 publish_date=publish_date,
                 account_file=account_file,
                 thumbnail_path=thumbnail_path,
-                account_id=account_id
+                account_id=account_id,
+                description=description or ''
             )
             print(f"[UPLOAD] 开始调用 WeixinVideo.main() 执行视频上传...")
             if douyin_logger:
@@ -765,8 +866,14 @@ async def execute_upload(title: str, file_path: str, tags: list, publish_date, a
             print(f"[UPLOAD] 开始调用 TiktokVideo.main() 执行视频上传...")
             if douyin_logger:
                 douyin_logger.info(f"开始调用 TiktokVideo.main() 执行视频上传: {title}")
-        else:
-            app = DouYinVideo(
+        elif platform == 'kuaishou':
+            try:
+                from uploader.kuaishou_uploader.main import KuaishouVideo
+            except ImportError as e:
+                if douyin_logger:
+                    douyin_logger.error(f"无法导入快手上传器: {e}")
+                raise Exception("快手发布模块未安装或不可用")
+            app = KuaishouVideo(
                 title=title,
                 file_path=file_path,
                 tags=tags,
@@ -775,9 +882,25 @@ async def execute_upload(title: str, file_path: str, tags: list, publish_date, a
                 thumbnail_path=thumbnail_path,
                 account_id=account_id
             )
+            print(f"[UPLOAD] 开始调用 KuaishouVideo.main() 执行视频上传...")
+            if douyin_logger:
+                douyin_logger.info(f"开始调用 KuaishouVideo.main() 执行视频上传: {title}")
+        elif platform == 'douyin':
+            app = DouYinVideo(
+                title=title,
+                file_path=file_path,
+                tags=tags,
+                publish_date=publish_date,
+                account_file=account_file,
+                thumbnail_path=thumbnail_path,
+                account_id=account_id,
+                description=description or ''
+            )
             print(f"[UPLOAD] 开始调用 DouYinVideo.main() 执行视频上传...")
             if douyin_logger:
                 douyin_logger.info(f"开始调用 DouYinVideo.main() 执行视频上传: {title}")
+        else:
+            raise Exception(f"不支持的发布平台: {platform}，仅支持 douyin / kuaishou / xiaohongshu / weixin / tiktok")
         
         updated_cookies = await app.main()
         

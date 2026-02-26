@@ -91,7 +91,7 @@
         <span v-else-if="loginStatus === 'scanning'">已扫描，等待用户确认登录...</span>
       </p>
       <p style="margin-top: 10px; color: #999; font-size: 14px;">
-        {{ currentLoginAccount?.platform === 'xiaohongshu' ? '请使用小红书APP扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'weixin' ? '请使用微信扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'tiktok' ? '请在浏览器中完成 TikTok 登录（邮箱/手机/第三方）' : '请使用抖音APP扫描浏览器中的二维码完成登录' }}
+        {{ currentLoginAccount?.platform === 'xiaohongshu' ? '请使用小红书APP扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'weixin' ? '请使用微信扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'kuaishou' ? '请使用快手APP扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'tiktok' ? '请在浏览器中完成 TikTok 登录（邮箱/手机/第三方）' : '请使用抖音APP扫描浏览器中的二维码完成登录' }}
       </p>
     </div>
     
@@ -277,10 +277,10 @@ const startLoginStatusPolling = (accountId) => {
   // 立即检查一次
   checkLoginStatus(accountId)
   
-  // 每3秒检查一次
+  // 每 5 秒检查一次（间隔不宜过短，避免后端频繁读页面导致二维码页被刷新/失效）
   loginStatusPollTimer = setInterval(() => {
     checkLoginStatus(accountId)
-  }, 3000)
+  }, 5000)
 }
 
 // 检查登录状态

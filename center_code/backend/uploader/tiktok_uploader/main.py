@@ -36,6 +36,7 @@ class TiktokVideo(object):
         self.title = (title or "").strip() or title
         self.file_path = file_path
         self.tags = tags if isinstance(tags, list) else (tags.split(",") if tags else [])
+        self.tags = [t.strip() for t in self.tags if t and str(t).strip()][:10]  # TikTok 最多10个 hashtag
         self.publish_date = publish_date
         self.account_file = account_file
         self.account_id = account_id

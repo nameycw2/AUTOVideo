@@ -1,5 +1,5 @@
 """
-视频剪辑 API（同步/异步剪辑、任务管理、成品管理）
+视频剪辑 API（同异步剪辑、任务管理、成品管理）
 """
 import os
 import sys
@@ -10,10 +10,12 @@ import logging
 import json
 import shutil
 import uuid
-from typing import Optional
-
+import math
+from typing import Optional, List, Dict, Any
 from flask import Blueprint, request, send_from_directory
+import requests
 
+# 适配项目路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import response_success, response_error, login_required, get_current_user_id
 from models import Material, VideoEditTask, VideoLibrary
@@ -21,83 +23,143 @@ from db import get_db
 from utils.video_editor import video_editor, get_abs_path
 from utils.cos_service import list_objects_from_cos
 
-# 检查COS是否可用
+# 检查腾讯云 COS 状态
 try:
-    from utils.cos_service import upload_file_to_cos, generate_cos_key, delete_file_from_cos
+    from utils.cos_service import (
+        upload_file_to_cos, 
+        generate_cos_key, 
+        delete_file_from_cos, 
+        upload_file_data_to_cos,
+        get_file_url
+    )
     COS_AVAILABLE = True
 except ImportError:
     COS_AVAILABLE = False
-    print("警告：腾讯云COS SDK未安装，成品将使用本地存储")
+    print("警告：腾讯云COS SDK未安装，系统将回退至本地存储")
 
 logger = logging.getLogger(__name__)
-
 editor_bp = Blueprint('editor', __name__, url_prefix='/api')
 
-# 配置路径
+# ==========================================
+#  1. 路径与常量全局配置
+# ==========================================
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-OUTPUT_VIDEO_DIR = os.path.join(BASE_DIR, 'uploads', 'videos')
 UPLOADS_DIR = os.path.join(BASE_DIR, 'uploads')
 SUBTITLE_DIR = os.path.join(UPLOADS_DIR, 'subtitles')
-
-# 自动创建目录
-if not os.path.exists(OUTPUT_VIDEO_DIR):
-    os.makedirs(OUTPUT_VIDEO_DIR)
-
-# 片段缓存目录（用于图片转视频片段等）
+OUTPUT_VIDEO_DIR = os.path.join(BASE_DIR, 'uploads', 'videos')
 SEGMENTS_DIR = os.path.join(OUTPUT_VIDEO_DIR, 'segments')
-os.makedirs(SEGMENTS_DIR, exist_ok=True)
 
-# 资源与并发限制（可用环境变量覆盖）
+# 自动初始化物理目录
+for folder in [OUTPUT_VIDEO_DIR, SEGMENTS_DIR, SUBTITLE_DIR]:
+    os.makedirs(folder, exist_ok=True)
+
+# 并发与时长限制（可通过环境变量动态调整）
 MAX_CLIPS = int(os.environ.get("MAX_EDIT_CLIPS", "100"))
 MAX_TOTAL_SECONDS = float(os.environ.get("MAX_EDIT_TOTAL_SECONDS", "1800"))
 MAX_CONCURRENT_EDIT_THREADS = int(os.environ.get("MAX_EDIT_THREADS", "2"))
-SEGMENT_DIR_TTL_SECONDS = int(os.environ.get("SEGMENT_DIR_TTL_SECONDS", "86400"))
+SEGMENT_DIR_TTL_SECONDS = int(os.environ.get("SEGMENT_DIR_TTL_SECONDS", "86400")) # 默认清理1天前的缓存
 
-
-def _ensure_within_dir(path: str, base_dir: str) -> str:
-    path = os.path.normpath(path)
-    base_dir = os.path.normpath(base_dir)
-    try:
-        if os.path.commonpath([os.path.normcase(path), os.path.normcase(base_dir)]) != os.path.normcase(base_dir):
-            raise ValueError("path outside allowed directory")
-    except Exception:
-        raise ValueError("path outside allowed directory")
-    return path
-
-
-def _cleanup_old_segment_dirs():
-    try:
-        now_ts = time.time()
-        if not os.path.isdir(SEGMENTS_DIR):
-            return
-        for name in os.listdir(SEGMENTS_DIR):
-            if not name.startswith("task_"):
-                continue
-            p = os.path.join(SEGMENTS_DIR, name)
-            try:
-                if os.path.isdir(p):
-                    mtime = os.path.getmtime(p)
-                    if now_ts - mtime > SEGMENT_DIR_TTL_SECONDS:
-                        shutil.rmtree(p, ignore_errors=True)
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-# 异步任务管理
 _TASK_THREADS = {}
 _TASK_LOCK = threading.Lock()
 
+def _ims_to_cos_worker(task_id, job_id, aliyun_oss_url, user_id):
+    """
+    后台搬运工：轮询 IMS 任务并将结果转存 COS
+    修正：去除了错误的列表查询逻辑，确保数据库操作在同一 Session 内完成
+    """
+    from utils.aliyun_ims import create_ice_client
+    from alibabacloud_ice20201109 import models as ice_models
+    from utils.cos_service import upload_file_data_to_cos, generate_cos_key
+
+    client = create_ice_client()
+    # 轮询 60 次，共计约 10 分钟
+    for _ in range(60):
+        try:
+            req = ice_models.GetMediaProducingJobRequest(job_id=job_id)
+            resp = client.get_media_producing_job(req)
+            status = resp.body.media_producing_job.status
+
+            if status == 'Success':
+                video_res = requests.get(aliyun_oss_url, timeout=30)
+                if video_res.status_code == 200:
+                    filename = os.path.basename(aliyun_oss_url).split('?')[0]
+                    cos_key = generate_cos_key('video', f"ims_{uuid.uuid4().hex}_{filename}")
+
+                    # 上传至腾讯云 COS
+                    upload_res = upload_file_data_to_cos(video_res.content, cos_key)
+                    if upload_res['success']:
+                        final_url = upload_res['url']
+
+                        # 核心修复：开启 Session 并完成所有更新操作后再退出
+                        with get_db() as db:
+                            task = db.query(VideoEditTask).filter(VideoEditTask.id == task_id).first()
+                            if task:
+                                task.status = "success"
+                                task.progress = 100
+                                task.preview_url = final_url
+                                task.updated_at = datetime.datetime.now()
+
+                                # 创建成品库记录，关联 user_id
+                                lib_record = VideoLibrary(
+                                    user_id=user_id,
+                                    video_name=f"IMS特效_{filename}",
+                                    video_url=final_url,
+                                    platform='output',
+                                    created_at=datetime.datetime.now()
+                                )
+                                db.add(lib_record)
+                                db.commit()
+                                logger.info(f"[IMS Worker] 任务 {task_id} 成功搬运至 COS 并入库")
+                        return  # 任务完成，退出线程
+            
+            elif status == 'Fail':
+                with get_db() as db:
+                    task = db.query(VideoEditTask).filter(VideoEditTask.id == task_id).first()
+                    if task:
+                        task.status, task.error_message = "fail", "阿里云 IMS 渲染失败"
+                        db.commit()
+                return
+
+        except Exception as e:
+            logger.error(f"[IMS Worker] 轮询异常 (JobID: {job_id}): {str(e)}")
+
+        time.sleep(10)
+
+
+# ==========================================
+#  2. 内部安全与校验辅助函数
+# ==========================================
+
+def _ensure_within_dir(path: str, base_dir: str) -> str:
+    """路径安全卫士：防止路径穿越攻击"""
+    path = os.path.normpath(path)
+    base_dir = os.path.normpath(base_dir)
+    if os.path.commonpath([os.path.normcase(path), os.path.normcase(base_dir)]) != os.path.normcase(base_dir):
+        raise ValueError("非法访问：检测到越权路径尝试")
+    return path
+
+def _cleanup_old_segment_dirs():
+    """磁盘清理工：自动清理过期的图片转视频临时片段"""
+    try:
+        now_ts = time.time()
+        if not os.path.isdir(SEGMENTS_DIR): return
+        for name in os.listdir(SEGMENTS_DIR):
+            if not name.startswith("task_"): continue
+            p = os.path.join(SEGMENTS_DIR, name)
+            if os.path.isdir(p) and now_ts - os.path.getmtime(p) > SEGMENT_DIR_TTL_SECONDS:
+                shutil.rmtree(p, ignore_errors=True)
+                logger.info(f"[Cleanup] 已自动清理过期缓存目录: {name}")
+    except Exception as e:
+        logger.error(f"[Cleanup Error] {str(e)}")
 
 def _probe_duration_seconds(path: str) -> float:
+    """利用 FFmpeg 探测素材时长"""
     try:
-        import ffmpeg  # type: ignore
-
+        import ffmpeg
         probe = ffmpeg.probe(path)
-        fmt = probe.get("format") or {}
-        return float(fmt.get("duration") or 0) or 0.0
-    except Exception:
-        return 0.0
+        return float(probe.get("format", {}).get("duration", 0))
+    except Exception: return 0.0
+
 
 
 def _resolve_ffmpeg_exe() -> str:
@@ -126,12 +188,12 @@ def _resolve_ffmpeg_exe() -> str:
         if os.path.exists(p):
             return p
 
-    raise RuntimeError("未找到 FFmpeg，可在系统 PATH 安装或设置 FFMPEG_PATH")
+    raise RuntimeError("未找�?FFmpeg，可在系�?PATH 安装或设�?FFMPEG_PATH")
 
 
 def _calculate_output_dimensions(resolution: str, ratio: str) -> tuple[int, int]:
     """
-    根据分辨率和比例计算输出视频的宽高
+    根据分辨率和比例计算输出视频的宽�?
     
     Args:
         resolution: 'auto', '1080p', '720p'
@@ -140,7 +202,7 @@ def _calculate_output_dimensions(resolution: str, ratio: str) -> tuple[int, int]
     Returns:
         (width, height) 元组
     """
-    # 解析分辨率
+    # 解析分辨�?
     if resolution == '1080p':
         base_height = 1080
     elif resolution == '720p':
@@ -216,13 +278,13 @@ def _coerce_image_duration_seconds(value) -> float:
 
 
 def _validate_image_duration_seconds(duration: float) -> float:
-    # 前端建议限制 0.5–30，后端强校验兜底
+    # 前端建议限制 0.5�?0，后端强校验兜底
     import math
 
     if not math.isfinite(duration):
         raise ValueError("image.duration must be a finite number")
     if duration < 0.5 or duration > 30:
-        raise ValueError("image.duration 超出范围（0.5–30 秒）")
+        raise ValueError("image.duration 超出范围�?.5�?0 秒）")
     return float(duration)
 
 
@@ -296,7 +358,7 @@ def _build_segments_from_request(data: dict, target_width: int = 1080, target_he
             clip_type = c["type"]
             if clip_type == "video":
                 if mat.type != "video":
-                    raise ValueError(f"素材ID {c['materialId']} 类型错误，期望 video，实际 {mat.type}")
+                    raise ValueError(f"素材ID {c['materialId']} 类型错误，期�?video，实�?{mat.type}")
                 abs_path = get_abs_path(mat.path)
                 if not os.path.exists(abs_path):
                     raise ValueError(f"视频文件不存在：{mat.path}")
@@ -310,7 +372,7 @@ def _build_segments_from_request(data: dict, target_width: int = 1080, target_he
                 legacy_video_ids.append(int(c["materialId"]))
             elif clip_type == "image":
                 if mat.type != "image":
-                    raise ValueError(f"素材ID {c['materialId']} 类型错误，期望 image，实际 {mat.type}")
+                    raise ValueError(f"素材ID {c['materialId']} 类型错误，期�?image，实�?{mat.type}")
                 abs_path = get_abs_path(mat.path)
                 if not os.path.exists(abs_path):
                     raise ValueError(f"图片文件不存在：{mat.path}")
@@ -413,6 +475,9 @@ def _run_edit_task(
     is_mixed_clips: bool = False,
     target_width: int = 1080,
     target_height: int = 1920,
+    filter_type: Optional[str] = None,
+    filter_intensity: float = 1.0,
+    subtitle_params: Optional[dict] = None,
 ):
     """在后台线程中执行剪辑任务"""
     try:
@@ -421,7 +486,7 @@ def _run_edit_task(
             if not task:
                 return
             
-            # 更新任务状态为运行中
+            # 更新任务状态为运行�?
             task.status = "running"
             task.progress = 10
             task.error_message = None
@@ -456,6 +521,7 @@ def _run_edit_task(
                     output_name,
                     target_width=target_width,
                     target_height=target_height,
+                    subtitle_params=subtitle_params,
                 )
             else:
                 output_path = video_editor.edit(
@@ -467,6 +533,7 @@ def _run_edit_task(
                     bgm_volume,
                     voice_volume,
                     output_name,
+                    subtitle_params=subtitle_params,
                 )
         except Exception as edit_ex:
             edit_error = str(edit_ex)
@@ -481,13 +548,42 @@ def _run_edit_task(
             task.updated_at = datetime.datetime.now()
             
             if edit_error:
-                # 剪辑过程中出现异常
+                # 剪辑过程中出现异�?
                 task.status = "fail"
                 task.progress = 100
                 task.error_message = f"剪辑失败：{edit_error}"
                 logger.error(f"Task {task_id}: Edit failed with error: {edit_error}")
             elif output_path and os.path.exists(output_path):
-                # 剪辑成功：上传到COS并保存到VideoLibrary
+                # 剪辑成功后，如果有滤镜，先应用滤镜处�?
+                if filter_type and filter_type != "original":
+                    try:
+                        logger.info(f"Task {task_id}: 应用滤镜 {filter_type}，强�?{filter_intensity}")
+                        from api.video_filter import VideoFilterProcessor
+                        
+                        # 创建带滤镜的临时输出文件
+                        output_dir = os.path.dirname(output_path)
+                        output_basename = os.path.basename(output_path)
+                        filter_output_path = os.path.join(output_dir, f"filtered_{output_basename}")
+                        
+                        # 应用滤镜
+                        success, message = VideoFilterProcessor.apply_filter(
+                            output_path, 
+                            filter_output_path, 
+                            filter_type
+                        )
+                        
+                        if success:
+                            # 替换原文�?
+                            if os.path.exists(output_path):
+                                os.remove(output_path)
+                            os.rename(filter_output_path, output_path)
+                            logger.info(f"Task {task_id}: 滤镜应用成功")
+                        else:
+                            logger.warning(f"Task {task_id}: 滤镜应用失败: {message}，继续使用原视频")
+                    except Exception as filter_ex:
+                        logger.exception(f"Task {task_id}: 滤镜应用异常: {filter_ex}，继续使用原视频")
+                
+                # 上传到COS并保存到VideoLibrary
                 output_filename = os.path.basename(output_path)
                 relative_output_path = os.path.relpath(output_path, BASE_DIR).replace(os.sep, "/")
                 uploads_rel = os.path.relpath(output_path, os.path.join(BASE_DIR, 'uploads')).replace(os.sep, '/')
@@ -512,11 +608,11 @@ def _run_edit_task(
                 except Exception as cos_error:
                     logger.exception(f"Task {task_id}: COS上传异常: {cos_error}")
                 
-                # 保存到VideoLibrary表
+                # 保存到VideoLibrary�?
                 video_library_id = None
                 try:
                     video_name = output_filename.replace('.mp4', '').replace('output_', 'AI剪辑_')
-                    # 从任务中获取user_id，确保数据隔离
+                    # 从任务中获取user_id，确保数据隔�?
                     user_id = task.user_id if hasattr(task, 'user_id') and task.user_id else None
                     
                     # 如果任务没有user_id，尝试从当前会话获取（备用方案）
@@ -538,11 +634,11 @@ def _run_edit_task(
                         logger.error(f"Task {task_id}: 无法获取user_id，无法保存到视频库")
                     else:
                         video_library = VideoLibrary(
-                            user_id=user_id,  # 关联任务所属用户
+                            user_id=user_id,  # 关联任务所属用�?
                             video_name=video_name,
                             video_url=cos_url or preview_url,  # 优先使用COS URL
                             video_size=os.path.getsize(output_path),
-                            platform='output',  # 标记为成品
+                            platform='output',  # 标记为成�?
                             description=f'AI剪辑生成，任务ID: {task_id}'
                         )
                         db.add(video_library)
@@ -552,7 +648,7 @@ def _run_edit_task(
                 except Exception as lib_error:
                     logger.exception(f"Task {task_id}: 保存到视频库失败: {lib_error}")
                 
-                # 更新任务状态
+                # 更新任务状�?
                 task.status = "success"
                 task.output_path = relative_output_path
                 task.output_filename = output_filename
@@ -567,7 +663,7 @@ def _run_edit_task(
                 logger.info(f"Task {task_id}: COS URL={cos_url}, VideoLibrary ID={video_library_id}")
                 
                 db.commit()
-                logger.info(f"Task {task_id}: 任务状态已更新为 success，已提交到数据库")
+                logger.info(f"Task {task_id}: 任务状态已更新�?success，已提交到数据库")
             else:
                 # 未生成输出文件
                 task.status = "fail"
@@ -617,14 +713,14 @@ def edit_video():
     
     请求方法: POST
     路径: /api/editor/edit
-    认证: 需要登录
+    认证: 需要登�?
     
-    请求体 (JSON):
+    请求�?(JSON):
         {
             "video_ids": [int],      # 必填，视频素材ID列表
             "voice_id": int,          # 可选，配音音频ID
             "bgm_id": int,            # 可选，BGM音频ID
-            "speed": float,           # 可选，播放速度（0.5-2.0），默认 1.0
+            "speed": float,           # 可选，播放速度�?.5-2.0），默认 1.0
             "subtitle_path": "string" # 可选，字幕文件路径（相对路径）
         }
     
@@ -760,7 +856,7 @@ def edit_video():
             else:
                 output_name = None
 
-            # 获取当前用户ID，确保数据隔离
+            # 获取当前用户ID，确保数据隔�?
             user_id = get_current_user_id()
             if not user_id:
                 return response_error('请先登录', 401)
@@ -783,8 +879,8 @@ def edit_video():
             db.commit()
 
         try:
-            # 调用剪辑逻辑（使用默认音量：bgm_volume=0.25, voice_volume=1.0）
-            # 注意：同步接口暂不支持自定义音量，使用默认值
+            # 调用剪辑逻辑（使用默认音量：bgm_volume=0.25, voice_volume=1.0�?
+            # 注意：同步接口暂不支持自定义音量，使用默认�?
             segment_paths = _repeat_last_image_segment_to_cover_voice(
                 segment_paths=segment_paths,
                 normalized_clips=normalized_clips,
@@ -813,15 +909,12 @@ def edit_video():
                             upload_result = upload_file_to_cos(output_path, cos_key)
                             if upload_result['success']:
                                 cos_url = upload_result['url']
-                                print(f"[Editor] 视频已上传到COS: {cos_url}")
                             else:
-                                print(f"[Editor] 上传到COS失败: {upload_result['message']}")
+                                logger.warning(f"[Editor] 上传到COS失败: {upload_result['message']}")
                     except Exception as cos_error:
-                        print(f"[Editor] COS上传异常: {cos_error}")
-                        import traceback
-                        traceback.print_exc()
+                        logger.exception(f"[Editor] COS上传异常: {cos_error}")
                     
-                    # 保存到VideoLibrary表
+                    # 保存到VideoLibrary�?
                     video_library_id = None
                     try:
                         video_name = output_filename.replace('.mp4', '').replace('output_', 'AI剪辑_')
@@ -833,7 +926,6 @@ def edit_video():
                             try:
                                 user_id = get_current_user_id()
                                 if user_id:
-                                    print(f"[Editor] 任务缺少user_id，从当前会话获取: {user_id}")
                                     # 更新任务的user_id（如果可能）
                                     try:
                                         task.user_id = user_id
@@ -844,26 +936,23 @@ def edit_video():
                                 pass
                         
                         if not user_id:
-                            print(f"[Editor] 无法获取user_id，无法保存到视频库")
+                            logger.error("[Editor] 无法获取user_id, 无法保存到视频库")
                         else:
                             video_library = VideoLibrary(
                                 user_id=user_id,  # 关联任务所属用户
                                 video_name=video_name,
                                 video_url=cos_url or preview_url,  # 优先使用COS URL
                                 video_size=os.path.getsize(output_path),
-                                platform='output',  # 标记为成品
+                                platform='output',  # 标记为成品视频
                                 description=f'AI剪辑生成，任务ID: {task_id}'
                             )
                             db.add(video_library)
                             db.flush()
                             video_library_id = video_library.id
-                            print(f"[Editor] 已保存到视频库，ID: {video_library_id}, user_id: {user_id}")
                     except Exception as lib_error:
-                        print(f"[Editor] 保存到视频库失败: {lib_error}")
-                        import traceback
-                        traceback.print_exc()
+                        logger.exception(f"[Editor] 保存到视频库失败: {lib_error}")
                     
-                    # 更新任务状态
+                    # 更新任务状�?
                     task.status = "success"
                     task.output_path = relative_output_path
                     task.output_filename = output_filename
@@ -925,17 +1014,17 @@ def edit_video_async():
     
     请求方法: POST
     路径: /api/editor/edit_async
-    认证: 需要登录
+    认证: 需要登�?
     
-    请求体 (JSON):
+    请求�?(JSON):
         {
             "video_ids": [int],      # 必填，视频素材ID列表
             "voice_id": int,          # 可选，配音音频ID
             "bgm_id": int,            # 可选，BGM音频ID
-            "speed": float,           # 可选，播放速度（0.5-2.0），默认 1.0
+            "speed": float,           # 可选，播放速度�?.5-2.0），默认 1.0
             "subtitle_path": "string", # 可选，字幕文件路径（相对路径）
-            "bgm_volume": float,      # 可选，BGM音量（0.0-1.0），默认 0.25
-            "voice_volume": float     # 可选，配音音量（0.0-1.0），默认 1.0
+            "bgm_volume": float,      # 可选，BGM音量�?.0-1.0），默认 0.25
+            "voice_volume": float     # 可选，配音音量�?.0-1.0），默认 1.0
         }
     
     返回数据:
@@ -970,6 +1059,22 @@ def edit_video_async():
         ratio = data.get("ratio", "auto")
         target_width, target_height = _calculate_output_dimensions(resolution, ratio)
         logger.info(f"视频输出尺寸: {target_width}x{target_height} (resolution={resolution}, ratio={ratio})")
+        
+        # 获取滤镜参数（支持两种参数名：filter/filter_type �?filterIntensity/filter_intensity�?
+        filter_type = (data.get("filter") or data.get("filter_type") or "").strip() or None
+        filter_intensity = data.get("filterIntensity") or data.get("filter_intensity", 1.0)
+        try:
+            filter_intensity = float(filter_intensity)
+            filter_intensity = max(0.0, min(1.0, filter_intensity))  # 限制�?0.0-1.0 范围�?
+        except Exception:
+            filter_intensity = 1.0
+        if filter_type:
+            logger.info(f"滤镜参数: filter_type={filter_type}, filter_intensity={filter_intensity}")
+        
+        # 获取字幕样式参数
+        subtitle_params = data.get("subtitle_params") or data.get("subtitleParams")
+        if subtitle_params:
+            logger.info(f"字幕样式参数: {json.dumps(subtitle_params, ensure_ascii=False)}")
 
         _cleanup_old_segment_dirs()
 
@@ -985,7 +1090,7 @@ def edit_video_async():
             if not video_ids or not isinstance(video_ids, list) or len(video_ids) == 0:
                 return response_error("视频ID列表不能为空", 400)
             if len(video_ids) > MAX_CLIPS:
-                return response_error(f"video_ids 数量超出限制（{MAX_CLIPS}）", 400)
+                return response_error(f"video_ids 数量超出限制（{MAX_CLIPS}个）", 400)
         
         try:
             speed = float(speed)
@@ -996,7 +1101,7 @@ def edit_video_async():
             return response_error("播放速度超出范围（0.5~2.0）", 400)
 
         # 查询视频素材的绝对路径，并收集素材名称用于生成文件名
-        # 新协议：clips 优先（支持 video/image 混排）
+        # 新协议：clips 优先（支�?video/image 混排�?
         if clips is not None:
             try:
                 segment_paths, legacy_video_ids, normalized_clips, temp_files, temp_dir = _build_segments_from_request(
@@ -1066,7 +1171,7 @@ def edit_video_async():
                 if video_names:
                     clips_name = "_".join([sanitize_filename(name) for name in video_names[:3]])
                     if len(video_names) > 3:
-                        clips_name += f"_等{len(video_names)}个"
+                        clips_name += f"_等{len(video_names)}个素材"
                     if clips_name:
                         name_parts.append(clips_name)
 
@@ -1083,7 +1188,7 @@ def edit_video_async():
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 output_name = "_".join(name_parts) + "_" + timestamp + ".mp4" if name_parts else None
 
-                # 获取当前用户ID，确保数据隔离
+                # 获取当前用户ID，确保数据隔�?
                 user_id = get_current_user_id()
                 if not user_id:
                     return response_error('请先登录', 401)
@@ -1096,6 +1201,8 @@ def edit_video_async():
                     bgm_id=bgm_id,
                     speed=speed,
                     subtitle_path=subtitle_path,
+                    filter_type=filter_type,
+                    filter_intensity=filter_intensity,
                     status="pending",
                     progress=0,
                     error_message=None,
@@ -1129,6 +1236,9 @@ def edit_video_async():
                     (any(c.get("type") == "image" for c in normalized_clips) and any(c.get("type") == "video" for c in normalized_clips)),
                     target_width,
                     target_height,
+                    filter_type,
+                    filter_intensity,
+                    subtitle_params,
                 ),
                 daemon=True,
             )
@@ -1159,7 +1269,7 @@ def edit_video_async():
                     return response_error(f"无法确定素材时长：{mat.path}", 400)
                 total_seconds += duration
                 video_paths.append(abs_path)
-                # 收集视频名称（去掉扩展名）
+                # 收集视频名称（去掉扩展名�?
                 video_name = os.path.splitext(mat.name or os.path.basename(mat.path))[0]
                 video_names.append(video_name)
 
@@ -1173,7 +1283,7 @@ def edit_video_async():
                     logger.error(f"配音素材ID {voice_id} 不存在")
                     return response_error(f"配音素材ID {voice_id} 不存在或类型错误", 400)
                 if voice_mat.type != "audio":
-                    logger.error(f"配音素材ID {voice_id} 类型错误，期望 audio，实际 {voice_mat.type}")
+                    logger.error(f"配音素材ID {voice_id} 类型错误，期望audio，实际{voice_mat.type}")
                     return response_error(f"配音素材ID {voice_id} 不存在或类型错误", 400)
                 voice_path = get_abs_path(voice_mat.path)
                 logger.info(f"配音文件路径：相对路径={voice_mat.path}，绝对路径={voice_path}")
@@ -1181,10 +1291,10 @@ def edit_video_async():
                     logger.error(f"配音文件不存在：{voice_path}")
                     return response_error(f"配音文件不存在：{voice_mat.path}", 400)
                 logger.info(f"配音文件验证成功：{voice_path}")
-                # 获取配音名称（去掉扩展名和前缀）
+                # 获取配音名称（去掉扩展名和前缀�?
                 voice_name = voice_mat.name or os.path.basename(voice_mat.path)
                 voice_name = os.path.splitext(voice_name)[0]
-                # 去掉可能的"配音_"或"TTS_"前缀
+                # 去掉可能�?配音_"�?TTS_"前缀
                 if voice_name.startswith("配音_"):
                     voice_name = voice_name[2:]
                 elif voice_name.startswith("TTS_"):
@@ -1197,12 +1307,12 @@ def edit_video_async():
                 bgm_path = get_abs_path(bgm_mat.path)
                 if not os.path.exists(bgm_path):
                     return response_error(f"BGM文件不存在：{bgm_mat.path}", 400)
-                # 获取BGM名称（去掉扩展名）
+                # 获取BGM名称（去掉扩展名�?
                 bgm_name = os.path.splitext(bgm_mat.name or os.path.basename(bgm_mat.path))[0]
 
             abs_sub_path = None
             if subtitle_path:
-                logger.info(f"处理字幕路径，原始路径={subtitle_path}")
+                logger.info(f"处理字幕路径，原始路�?{subtitle_path}")
                 # 如果subtitle_path是URL（以/开头），转换为文件路径
                 if subtitle_path.startswith('/'):
                     # 去掉前导斜杠，转换为相对路径
@@ -1232,16 +1342,16 @@ def edit_video_async():
                 """清理文件名，移除非法字符"""
                 if not s:
                     return ""
-                # 移除或替换非法字符
+                # 移除或替换非法字�?
                 s = re.sub(r'[<>:"/\\|?*]', '', s)  # 移除Windows非法字符
                 s = re.sub(r'\s+', '_', s)  # 空格替换为下划线
                 s = s.strip('._')  # 移除首尾的点和下划线
-                return s[:30]  # 限制每个部分的长度
+                return s[:30]  # 限制每个部分的长�?
             
             name_parts = []
             # 添加切片名称（如果有多个，用短横线连接）
             if video_names:
-                clips_name = "_".join([sanitize_filename(name) for name in video_names[:3]])  # 最多取前3个
+                clips_name = "_".join([sanitize_filename(name) for name in video_names[:3]])  # 最多取三个
                 if len(video_names) > 3:
                     clips_name += f"_等{len(video_names)}个"
                 if clips_name:
@@ -1259,18 +1369,18 @@ def edit_video_async():
                 if bgm_clean:
                     name_parts.append(bgm_clean)
             
-            # 添加时间戳
+            # 添加时间�?
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             
             if name_parts:
                 output_name = "_".join(name_parts) + "_" + timestamp + ".mp4"
             else:
-                # 如果没有素材名称，使用默认命名
+                # 如果没有素材名称，使用默认命�?
                 output_name = None
             
             logger.info(f"生成的输出文件名: {output_name}")
 
-            # 获取当前用户ID，确保数据隔离
+            # 获取当前用户ID，确保数据隔�?
             user_id = get_current_user_id()
             if not user_id:
                 return response_error('请先登录', 401)
@@ -1284,6 +1394,8 @@ def edit_video_async():
                 bgm_id=bgm_id,
                 speed=speed,
                 subtitle_path=subtitle_path,
+                filter_type=filter_type,
+                filter_intensity=filter_intensity,
                 status="pending",
                 progress=0,
                 error_message=None
@@ -1296,7 +1408,7 @@ def edit_video_async():
         # 启动后台任务
         t = threading.Thread(
             target=_run_edit_task,
-            args=(task_id, video_paths, voice_path, bgm_path, speed, abs_sub_path, bgm_volume, voice_volume, output_name, None, None),
+            args=(task_id, video_paths, voice_path, bgm_path, speed, abs_sub_path, bgm_volume, voice_volume, output_name, None, None, False, target_width, target_height, filter_type, filter_intensity, subtitle_params),
             daemon=True
         )
         with _TASK_LOCK:
@@ -1320,12 +1432,12 @@ def list_tasks():
     
     请求方法: GET
     路径: /api/tasks
-    认证: 需要登录
+    认证: 需要登�?
     
     查询参数:
-        status (string, 可选): 任务状态筛选（pending/running/success/fail）
-        limit (int, 可选): 每页数量，默认 50
-        offset (int, 可选): 偏移量，默认 0
+        status (string, 可选?: 任务状态筛选（pending/running/success/failure）
+        limit (int, 可选?: 每页数量，默认50
+        offset (int, 可选?: 偏移量，默认 0
     
     返回数据:
         成功 (200):
@@ -1400,7 +1512,7 @@ def get_task(task_id: int):
     
     请求方法: GET
     路径: /api/tasks/{task_id}
-    认证: 需要登录
+    认证: 需要登�?
     
     返回数据:
         成功 (200):
@@ -1460,9 +1572,9 @@ def delete_task(task_id: int):
     
     请求方法: POST
     路径: /api/tasks/{task_id}/delete
-    认证: 需要登录
+    认证: 需要登�?
     
-    请求体 (JSON, 可选):
+    请求�?(JSON, 可�?:
         {
             "delete_output": false  # 可选，是否同时删除输出文件
         }
@@ -1508,177 +1620,60 @@ def delete_task(task_id: int):
 @editor_bp.route('/outputs', methods=['GET'])
 @login_required
 def list_outputs():
-    """
-    获取成品列表接口（根据user_id从数据库和COS获取视频列表）
-    
-    请求方法: GET
-    路径: /api/outputs
-    认证: 需要登录
-    
-    查询参数:
-        source (string, 可选): 数据源，'cos' 表示从COS获取，'db' 表示从数据库获取，默认 'cos'
-    
-    返回数据:
-        成功 (200):
-        {
-            "code": 200,
-            "message": "获取成品列表成功",
-            "data": [
-                {
-                    "id": int,  # 如果是数据库记录则为VideoLibrary ID，否则为索引
-                    "filename": "string",
-                    "video_name": "string",
-                    "size": int,
-                    "update_time": "string",
-                    "preview_url": "string",  # COS URL
-                    "video_url": "string",  # COS URL
-                    "download_url": "string",
-                    "task_id": int  # 如果有关联任务
-                }
-            ]
-        }
-    """
     try:
-        # 获取当前用户ID，确保数据隔离
         user_id = get_current_user_id()
-        if not user_id:
-            return response_error('请先登录', 401)
+        if not user_id: return response_error('请先登录', 401)
         
-        source = request.args.get("source", "cos")  # 默认从COS获取
+        source = request.args.get("source", "cos")
         
         if source == "cos":
-            # 先从COS获取所有视频，然后根据数据库记录过滤
-            logger.info(f"从COS获取用户 {user_id} 的成品视频列表")
-            try:
-                # 从COS获取所有视频
-                cos_result = list_objects_from_cos(prefix='video/', max_keys=1000)
+            cos_result = list_objects_from_cos(prefix='video/', max_keys=1000)
+            if not cos_result['success']: return _list_outputs_from_db(user_id)
+            
+            # 核心修复：必须在 get_db() 作用域内完成 VideoLibrary 对象属性的读取
+            with get_db() as db:
+                user_videos = db.query(VideoLibrary).filter(
+                    VideoLibrary.user_id == user_id,
+                    VideoLibrary.platform == 'output'
+                ).order_by(VideoLibrary.created_at.desc()).limit(500).all()
                 
-                if not cos_result['success']:
-                    logger.warning(f"从COS获取视频列表失败: {cos_result['message']}")
-                    # 如果COS获取失败，使用数据库中的URL
-                    logger.info("使用数据库中的URL")
-                    return _list_outputs_from_db(user_id)
-                
-                # 从数据库查询该用户的成品视频记录（用于匹配和获取元数据）
-                with get_db() as db:
-                    user_videos = db.query(VideoLibrary).filter(
-                        VideoLibrary.user_id == user_id,
-                        VideoLibrary.platform == 'output'
-                    ).order_by(VideoLibrary.created_at.desc()).limit(500).all()
-                
-                # 创建数据库记录映射：key为COS key，value为VideoLibrary记录
+                # 构建映射关系 (在 Session 存活期间操作对象)
                 db_video_map = {}
                 for video in user_videos:
                     if video.video_url:
                         from api.video_library import _extract_cos_key_from_url
                         cos_key = _extract_cos_key_from_url(video.video_url)
-                        if cos_key:
-                            db_video_map[cos_key] = video
-                        else:
-                            # 如果无法提取COS key，尝试通过文件名匹配
-                            filename = os.path.basename(video.video_url)
-                            db_video_map[filename] = video
-                
+                        if cos_key: db_video_map[cos_key] = video
+                        else: db_video_map[os.path.basename(video.video_url)] = video
+
                 items = []
                 for obj in cos_result['objects']:
-                    try:
-                        cos_key = obj['key']
-                        filename = obj['filename']
-                        
-                        # 查找对应的数据库记录
-                        db_video = db_video_map.get(cos_key) or db_video_map.get(filename)
-                        
-                        if db_video:
-                            # 如果数据库中有记录且user_id匹配，使用数据库的元数据
-                            video_name = db_video.video_name or filename.replace('.mp4', '').replace('output_', 'AI剪辑_')
-                            video_size = db_video.video_size or obj['size']
-                            
-                            # 处理时间格式
-                            update_time_str = ""
-                            if db_video.created_at:
-                                if isinstance(db_video.created_at, datetime.datetime):
-                                    update_time_str = db_video.created_at.strftime("%Y-%m-%d %H:%M:%S")
-                                else:
-                                    update_time_str = str(db_video.created_at)
-                            
-                            # 从description中解析任务ID
-                            task_id = None
-                            if db_video.description:
-                                import re
-                                match = re.search(r'任务ID:\s*(\d+)', db_video.description)
-                                if match:
-                                    task_id = int(match.group(1))
-                            
-                            # 获取缩略图URL（如果有）
-                            thumbnail_url = None
-                            if db_video.thumbnail_url:
-                                # 刷新COS URL（如果是COS URL）
-                                from api.video_library import _refresh_cos_url_if_needed
-                                thumbnail_url = _refresh_cos_url_if_needed(db_video.thumbnail_url)
-                            
-                            items.append({
-                                "id": db_video.id,
-                                "filename": filename,
-                                "video_name": video_name,
-                                "size": video_size,
-                                "update_time": update_time_str,
-                                "preview_url": obj['url'],
-                                "video_url": obj['url'],
-                                "download_url": obj['url'],
-                                "thumbnail_url": thumbnail_url,  # 添加缩略图URL
-                                "task_id": task_id,
-                                "cos_key": cos_key
-                            })
-                        else:
-                            # 如果数据库中没有记录，也返回（可能是新上传的，但无法确定user_id）
-                            # 为了安全，这里可以选择不返回，或者返回但标记为未关联
-                            # 暂时返回，让前端显示，但ID使用索引
-                            video_name = filename.replace('.mp4', '').replace('output_', 'AI剪辑_')
-                            items.append({
-                                "id": len(items) + 10000,  # 使用大数字避免与数据库ID冲突
-                                "filename": filename,
-                                "video_name": video_name,
-                                "size": obj['size'],
-                                "update_time": obj['last_modified'] if obj['last_modified'] else "",
-                                "preview_url": obj['url'],
-                                "video_url": obj['url'],
-                                "download_url": obj['url'],
-                                "thumbnail_url": None,  # 数据库中没有记录，无法获取缩略图
-                                "task_id": None,
-                                "cos_key": cos_key
-                            })
-                    except Exception as e:
-                        logger.warning(f"处理COS对象 {obj.get('key', 'unknown')} 时出错：{e}")
-                        continue
-                
-                # 按更新时间排序（最新的在前）
-                try:
-                    items.sort(key=lambda x: x.get("update_time") or "", reverse=True)
-                except Exception as sort_error:
-                    logger.warning(f"排序时出错：{sort_error}")
-                
-                logger.info(f"用户 {user_id} 从COS获取到 {len(items)} 个成品视频（其中 {len([i for i in items if i['id'] < 10000])} 个有数据库记录）")
-                return response_success(items, "获取成品列表成功")
-            except Exception as cos_ex:
-                logger.exception(f"从COS获取视频列表时发生异常: {cos_ex}")
-                # 发生异常时，自动回退到数据库
-                logger.info("发生异常，自动回退到数据库获取成品列表")
-                return _list_outputs_from_db(user_id)
+                    cos_key, filename = obj['key'], obj['filename']
+                    db_video = db_video_map.get(cos_key) or db_video_map.get(filename)
+                    
+                    if db_video:
+                        items.append({
+                            "id": db_video.id,
+                            "filename": filename,
+                            "video_name": db_video.video_name,
+                            "size": db_video.video_size or obj['size'],
+                            "update_time": db_video.created_at.strftime("%Y-%m-%d %H:%M:%S") if db_video.created_at else "",
+                            "preview_url": obj['url'],
+                            "video_url": obj['url']
+                        })
+            return response_success(items, "获取成品列表成功")
         else:
-            # 从数据库获取
             return _list_outputs_from_db(user_id)
-    
     except Exception as e:
         logger.exception("List outputs failed")
         return response_error(f"获取成品列表失败：{str(e)}", 500)
-
 
 def _list_outputs_from_db(user_id=None):
     """从数据库获取成品列表（备用方案）"""
     try:
         items = []
         
-        # 获取当前用户ID（如果未提供）
+        # 获取当前用户ID（如果未提供�?
         if not user_id:
             user_id = get_current_user_id()
             if not user_id:
@@ -1715,7 +1710,7 @@ def _list_outputs_from_db(user_id=None):
                         if match:
                             task_id = int(match.group(1))
                     
-                    # 刷新COS URL（如果是COS URL）
+                    # 刷新COS URL（如果是COS URL�?
                     video_url = video.video_url or ''
                     thumbnail_url = None
                     if video.thumbnail_url:
@@ -1740,7 +1735,7 @@ def _list_outputs_from_db(user_id=None):
                         "task_id": task_id
                     })
                 except Exception as e:
-                    logger.warning(f"处理视频库记录 {video.id} 时出错：{e}")
+                    logger.warning(f"处理视频库记�?{video.id} 时出错：{e}")
                     continue
         
         # 按更新时间排序
@@ -1764,9 +1759,9 @@ def delete_output():
     
     请求方法: POST
     路径: /api/output/delete
-    认证: 需要登录
+    认证: 需要登�?
     
-    请求体 (JSON):
+    请求�?(JSON):
         {
             "filename": "string"  # 必填，文件名
         }
@@ -1782,22 +1777,22 @@ def delete_output():
     try:
         data = request.get_json(silent=True) or {}
         filename = (data.get("filename") or "").strip()
-        cos_key = data.get("cos_key")  # 如果前端传递了COS key，直接使用
+        cos_key = data.get("cos_key")  # 如果前端传递了COS key，直接使�?
         
         if not filename:
             return response_error("文件名不能为空", 400)
         
-        # 如果文件名包含路径分隔符，可能是COS key，需要特殊处理
-        # 但为了安全，仍然需要验证路径
+        # 如果文件名包含路径分隔符，可能是COS key，需要特殊处?
+        # 但为了安全，仍然需要验证路?
         if ".." in filename:
             return response_error("非法文件名", 400)
 
-        # 1. 从VideoLibrary表中查找对应的记录（通过文件名匹配video_url）
+        # 1. 从VideoLibrary表中查找对应的记录（通过文件名匹配video_url?
         video_record_id = None
         video_url = None
         thumbnail_url = None
         with get_db() as db:
-            # 查找platform='output'且video_url包含该文件名的记录
+            # 查找platform='output'且video_url包含该文件名的记?
             videos = db.query(VideoLibrary).filter(
                 VideoLibrary.platform == 'output'
             ).all()
@@ -1806,12 +1801,12 @@ def delete_output():
             
             for video in videos:
                 v_url = video.video_url or ''
-                # 从URL中提取文件名（处理各种URL格式）
+                # 从URL中提取文件名（处理各种URL格式�?
                 url_filename = None
                 if v_url:
-                    # 移除查询参数（预签名URL可能包含?）
+                    # 移除查询参数（预签名URL可能包含?�?
                     clean_url = v_url.split('?')[0]
-                    # 提取文件名
+                    # 提取文件�?
                     url_filename = os.path.basename(clean_url)
                     # 如果URL包含路径，也尝试从路径中提取
                     if '/' in clean_url:
@@ -1830,18 +1825,18 @@ def delete_output():
                 
                 if is_match:
                     video_record_id = video.id
-                    video_url = v_url  # 在session内获取属性值
-                    thumbnail_url = video.thumbnail_url  # 在session内获取属性值
+                    video_url = v_url  # 在session内获取属性?
+                    thumbnail_url = video.thumbnail_url  # 在session内获取属性?
                     logger.info(f"找到匹配记录: video_id={video_record_id}, video_url={video_url}")
                     break
             
             if not video_record_id:
                 logger.warning(f"未找到匹配的数据库记录，文件名: {filename}")
         
-        # 2. 删除COS中的文件（优先使用前端传递的cos_key，否则从数据库记录中获取）
+        # 2. 删除COS中的文件（优先使用前端传递的cos_key，否则从数据库记录中获取?
         cos_key_to_delete = None
         if cos_key:
-            # 如果前端传递了cos_key，直接使用
+            # 如果前端传递了cos_key，直接使用?
             cos_key_to_delete = cos_key
             logger.info(f"使用前端传递的COS key: {cos_key_to_delete}")
         elif video_record_id and video_url and COS_AVAILABLE:
@@ -1851,7 +1846,7 @@ def delete_output():
                 
                 # 从video_url中提取COS key
                 if video_url and ('cos.' in video_url or (COS_DOMAIN and COS_DOMAIN in video_url)):
-                    # 从URL中提取COS键
+                    # 从URL中提取COS key
                     if COS_DOMAIN and COS_DOMAIN in video_url:
                         cos_key_to_delete = video_url.replace(COS_DOMAIN.rstrip('/') + '/', '').lstrip('/')
                     else:
@@ -1939,7 +1934,7 @@ def download_video(filename):
     
     请求方法: GET
     路径: /api/download/video/{filename}
-    认证: 需要登录
+    认证: 需要登�?
     
     返回: 视频文件（作为附件下载）
     """
@@ -1960,3 +1955,151 @@ def download_video(filename):
         logger.exception("Download video failed")
         return response_error(f"下载失败：{str(e)}", 500)
 
+@editor_bp.route('/editor/submit_ims', methods=['POST'])
+@login_required
+def handle_ims_submit():
+    """阿里云 IMS 高级字幕剪辑接口 (生产版)
+    逻辑：素材云端化 -> 字幕 ASS 转换 -> 提交阿里云渲染 -> 开启后台追踪
+    """
+    from utils.cos_service import upload_file_to_cos
+
+    try:
+        user_id = get_current_user_id()
+        data = request.get_json() or {}
+
+        # 调试：打印收到的全部请求数据
+        logger.info(f"[IMS DEBUG] 收到请求数据: {json.dumps(data, ensure_ascii=False)}")
+
+        # 1. 提取参数
+        video_url = data.get('video_url')      
+        subtitle_url = data.get('subtitle_url') 
+        voice_url = data.get('voice_url')  
+        bgm_url = data.get('bgm_url')      
+        params = data.get('subtitle_params')
+
+        if not video_url:
+            logger.error("[IMS DEBUG] video_url 为空，返回 400")
+            return response_error("视频路径不能为空", 400)
+
+        # 2. 媒体素材云端化 (处理视频、配音、BGM)
+        media_assets = {'video': video_url, 'voice': voice_url, 'bgm': bgm_url}
+        for key, path in media_assets.items():
+            if path and not path.startswith('http'):
+                # 兼容以 "/uploads/..." 或 "uploads/..." 开头的路径，统一转为相对 BASE_DIR
+                if path.startswith('/uploads/'):
+                    rel_path = path.lstrip('/')  # 去掉开头的 '/'
+                else:
+                    rel_path = path
+
+                abs_path = get_abs_path(rel_path)
+                logger.info(f"[IMS DEBUG] 检查 {key} 本地文件是否存在: path={path}, rel_path={rel_path}, abs_path={abs_path}")
+                if os.path.exists(abs_path):
+                    folder = "materials/videos" if key == 'video' else "materials/audio"
+                    cos_key = f"{folder}/{uuid.uuid4().hex}_{os.path.basename(path)}"
+                    logger.info(f"[IMS DEBUG] 开始上传 {key} 到 COS: cos_key={cos_key}")
+                    res = upload_file_to_cos(abs_path, cos_key)
+                    if res.get('success'):
+                        media_assets[key] = res.get('url')
+                        logger.info(f"[IMS DEBUG] {key} 上传成功: url={media_assets[key]}")
+                    else:
+                        logger.error(f"[IMS DEBUG] {key} 上传失败: {res}")
+                else:
+                    logger.error(f"[IMS DEBUG] 本地文件不存在，无法上传 {key}: abs_path={abs_path}")
+
+        video_url = media_assets['video']
+        voice_url = media_assets['voice']
+        bgm_url = media_assets['bgm']
+
+        # 3. 字幕高级处理 (SRT -> ASS)
+        if subtitle_url:
+            srt_content = None
+            pure_sub_name = os.path.basename(subtitle_url).split('?')[0]
+            actual_name = pure_sub_name.split('_', 1)[-1] if '_' in pure_sub_name else pure_sub_name
+            
+            # 搜索本地文件
+            possible_sub_paths = [
+                os.path.join(UPLOADS_DIR, "subtitles", pure_sub_name),
+                os.path.join(UPLOADS_DIR, "subtitles", actual_name),
+                os.path.join(UPLOADS_DIR, "tts", actual_name),
+            ]
+            
+            for p in possible_sub_paths:
+                if os.path.exists(p):
+                    with open(p, 'r', encoding='utf-8') as f:
+                        srt_content = f.read()
+                    break
+            
+            # 若本地无则尝试从云端下载内容
+            if not srt_content and subtitle_url.startswith('http'):
+                try:
+                    resp = requests.get(subtitle_url, timeout=5)
+                    if resp.status_code == 200:
+                        srt_content = resp.text
+                except Exception as e:
+                    logger.error(f"IMS 字幕云端下载失败: {e}")
+
+            # 执行转换并上传 ASS
+            if srt_content:
+                from utils.aliyun_ims import SubtitleEffectBuilder, convert_srt_to_ass_content
+                builder = SubtitleEffectBuilder("", params)
+                ass_content = convert_srt_to_ass_content(srt_content, builder.build_style())
+                
+                ass_filename = pure_sub_name.replace('.srt', '.ass')
+                local_ass_path = os.path.join(SUBTITLE_DIR, ass_filename)
+                
+                with open(local_ass_path, 'w', encoding='utf-8') as f:
+                    f.write(ass_content)
+                
+                up_res = upload_file_to_cos(local_ass_path, f"subtitles/{uuid.uuid4().hex}_{ass_filename}")
+                if up_res.get('success'):
+                    subtitle_url = up_res.get('url')
+
+        # 4. 提交至阿里云 IMS 渲染
+        from utils.aliyun_ims import submit_ims_task
+        # 确保 video_url 必须是 HTTP(s) 链接，否则阿里云无法抓取
+        if not video_url.startswith('http'):
+            logger.error(f"[IMS DEBUG] 素材云端化失败，video_url 非 http: {video_url}")
+            return response_error("素材云端化失败，无法提交至云渲染", 400)
+
+        output_filename = f"ims_output_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+        result = submit_ims_task(
+            video_url=video_url, 
+            subtitle_url=subtitle_url, 
+            output_filename=output_filename, 
+            subtitle_style=params,
+            voice_url=voice_url,
+            bgm_url=bgm_url
+        )
+        
+        if result and result.get('success'):
+            job_id = result.get('job_id')
+            aliyun_oss_url = result.get('output_url')
+
+            with get_db() as db:
+                new_task = VideoEditTask(
+                    user_id=user_id,
+                    video_ids=f"IMS高级任务: {os.path.basename(video_url)}",
+                    status="running", 
+                    progress=20, 
+                    error_message=f"JobID:{job_id}",
+                    created_at=datetime.datetime.now()
+                )
+                db.add(new_task)
+                db.flush()
+                task_id = new_task.id
+                db.commit()
+
+            # 启动后台异步监控
+            threading.Thread(
+                target=_ims_to_cos_worker, 
+                args=(task_id, job_id, aliyun_oss_url, user_id), 
+                daemon=True
+            ).start()
+            
+            return response_success({"task_id": task_id, "job_id": job_id}, "任务已提交，正在云端渲染")
+        
+        return response_error(f"IMS 提交失败: {result.get('message')}", 500)
+
+    except Exception as e:
+        logger.exception("IMS 提交路由内部异常")
+        return response_error(f"服务器内部错误: {str(e)}", 500)

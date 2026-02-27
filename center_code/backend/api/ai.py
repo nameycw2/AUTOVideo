@@ -30,7 +30,7 @@ SUBTITLE_DIR = os.path.join(BASE_DIR, 'uploads', 'subtitles')
 MATERIAL_AUDIO_DIR = os.path.join(BASE_DIR, 'uploads', 'materials', 'audios')
 
 # 自动创建目录
-for dir_path in [TTS_DIR, SUBTITLE_DIR]:
+for dir_path in [TTS_DIR, SUBTITLE_DIR, MATERIAL_AUDIO_DIR]:
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
 
@@ -268,11 +268,25 @@ def ai_tts_synthesize():
             
             final_path = os.path.join(MATERIAL_AUDIO_DIR, final_name)
             
+            # 确保目标目录存在
             try:
+                os.makedirs(MATERIAL_AUDIO_DIR, exist_ok=True)
+                logger.info(f"确保音频目录存在: {MATERIAL_AUDIO_DIR}")
+            except Exception as dir_err:
+                logger.error(f"创建音频目录失败: {dir_err}")
+                return response_error(f"创建音频目录失败：{dir_err}", 500)
+            
+            try:
+                # 移动文件到最终位置
+                logger.info(f"移动文件: {tmp_path} -> {final_path}")
                 os.replace(tmp_path, final_path)
+                logger.info(f"文件移动成功，大小: {os.path.getsize(final_path)} 字节")
+                
                 rel_path = os.path.relpath(final_path, BASE_DIR).replace(os.sep, "/")
                 uploads_rel = os.path.relpath(final_path, os.path.join(BASE_DIR, 'uploads')).replace(os.sep, '/')
                 preview_url = f"/uploads/{uploads_rel}"
+                
+                logger.info(f"相对路径: {rel_path}, 预览URL: {preview_url}")
                 
                 size = None
                 try:
@@ -284,6 +298,8 @@ def ai_tts_synthesize():
                 display_name = final_name.replace('.mp3', '')
                 if not display_name.startswith('TTS_'):
                     display_name = f"配音_{display_name}"
+                
+                logger.info(f"开始保存到数据库: name={display_name}, path={rel_path}, size={size}")
                 
                 with get_db() as db:
                     material = Material(
@@ -299,12 +315,15 @@ def ai_tts_synthesize():
                     db.flush()
                     db.commit()
                     material_id = material.id
+                    logger.info(f"数据库保存成功: material_id={material_id}")
             except Exception as e:
                 logger.exception("Persist TTS failed")
+                logger.error(f"失败详情: tmp_path={tmp_path}, final_path={final_path}")
                 # 如果入库失败，尝试删除文件
                 try:
                     if os.path.exists(final_path):
                         os.remove(final_path)
+                        logger.info(f"已清理失败的文件: {final_path}")
                 except Exception:
                     pass
                 return response_error(f"TTS 入库失败：{e}", 500)
@@ -448,12 +467,35 @@ def ai_subtitle_srt():
                 logger.error(f"音频素材不存在或类型错误: audio_material_id={audio_material_id}, mat={mat}")
                 return response_error("audio_material_id 不存在或类型不是 audio", 400)
 
-            # 标准化路径（处理Windows路径问题）
-            abs_audio = os.path.normpath(os.path.join(BASE_DIR, mat.path))
-            logger.info(f"查找音频文件: 相对路径={mat.path}, 绝对路径={abs_audio}")
+            # 导入统一的路径解析函数
+            try:
+                from utils.video_editor import get_abs_path
+                abs_audio = get_abs_path(mat.path)
+                logger.info(f"查找音频文件: 相对路径={mat.path}, 绝对路径={abs_audio}")
+            except Exception as path_err:
+                logger.error(f"路径解析失败: {path_err}")
+                # 如果 get_abs_path 不可用，回退到原有方法
+                abs_audio = os.path.normpath(os.path.join(BASE_DIR, mat.path))
+                logger.info(f"使用备用路径解析: 相对路径={mat.path}, 绝对路径={abs_audio}")
             
             if not os.path.isfile(abs_audio):
                 logger.error(f"音频文件不存在: {abs_audio}")
+                logger.error(f"BASE_DIR: {BASE_DIR}")
+                logger.error(f"mat.path: {mat.path}")
+                logger.error(f"当前工作目录: {os.getcwd()}")
+                
+                # 检查 uploads 目录是否存在
+                uploads_dir = os.path.join(BASE_DIR, 'uploads', 'materials', 'audios')
+                logger.error(f"音频目录是否存在: {os.path.exists(uploads_dir)}")
+                
+                # 尝试列出目录内容以帮助调试
+                try:
+                    if os.path.exists(uploads_dir):
+                        files = os.listdir(uploads_dir)
+                        logger.error(f"音频目录内文件列表（前10个）: {files[:10]}")
+                except Exception:
+                    pass
+                
                 return response_error(f"音频文件不存在：{mat.path}（绝对路径：{abs_audio}）", 400)
             
             logger.info(f"音频文件验证成功: {abs_audio}")
@@ -599,17 +641,44 @@ def ai_subtitle_srt():
                 f.write(srt_text)
             
             logger.info(f"字幕文件保存成功: {abs_path}, 大小={os.path.getsize(abs_path)} 字节")
+            
+            # --- START: 自动上传到腾讯云 COS ---
+            public_url = None
+            try:
+                from utils.cos_service import upload_file_to_cos
+                
+                cos_filename = f"{uuid.uuid4().hex}_{name}"
+                cos_key = f"subtitles/{cos_filename}"
+                
+                upload_res = upload_file_to_cos(abs_path, cos_key)
+                if upload_res and upload_res.get('success'):
+                    public_url = upload_res.get('url')
+                else:
+                    # 增加这行关键打印，查看失败原因
+                    logger.error(f"❌ COS上传失败详细信息: {upload_res.get('message')}")
+            except ImportError:
+                logger.warning("未找到 utils.cos_service，跳过 COS 上传")
+            except Exception as e:
+                logger.error(f"同步字幕到COS失败: {e}")
+            # --- END: 自动上传到腾讯云 COS ---
+            
         except Exception as e:
             logger.exception(f"保存字幕文件失败: {e}")
             return response_error(f"保存字幕文件失败：{str(e)}", 500)
 
         rel_path = os.path.relpath(abs_path, BASE_DIR).replace(os.sep, "/")
         uploads_rel = os.path.relpath(abs_path, os.path.join(BASE_DIR, 'uploads')).replace(os.sep, '/')
-        preview_url = f"/uploads/{uploads_rel}"
+        
+        # 优先使用公网链接，否则使用本地路径
+        preview_url = public_url if public_url else f"/uploads/{uploads_rel}"
+        
+        # 兼容旧版本字段，确保 url 总是存在的
+        url_field = public_url if public_url else preview_url
 
         result_data = {
             "path": rel_path,
             "preview_url": preview_url,
+            "url": url_field, # 增加 url 字段
             "duration": duration,
         }
         

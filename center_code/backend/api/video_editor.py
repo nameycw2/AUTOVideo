@@ -4,15 +4,104 @@ AI视频剪辑API
 """
 import os
 import sys
-from flask import Blueprint, request
+import time
+import uuid
+import threading
+import json
 from datetime import datetime
+from flask import Blueprint, request
+
+# 引入你的滤镜处理器
+# 修改为
+from api.video_filter import VideoFilterProcessor
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import response_success, response_error, login_required
+
+video_editor_bp = Blueprint('video_editor', __name__, url_prefix='/api/video-editor')
+
 # from models import VideoEditorProject, VideoEditorTask  # 待实现：需要创建对应的数据模型
 # from db import get_db  # 待实现：数据库操作
 
-video_editor_bp = Blueprint('video_editor', __name__, url_prefix='/api/video-editor')
+TASKS = {} 
+
+def _background_edit_process(task_id, data, base_dir):
+    """
+    后台剪辑线程：模拟剪辑过程 + 应用真实滤镜
+    """
+    try:
+        print(f"🚀 [Task {task_id}] 开始处理任务...")
+        TASKS[task_id]['status'] = 'processing'
+        TASKS[task_id]['progress'] = 10
+        
+        # 1. 解析参数
+        filter_type = data.get('filter_type', 'original')
+        filter_intensity = float(data.get('filter_intensity', 1.0))
+        clips = data.get('clips', [])
+        
+        # 模拟：第一阶段 - 视频拼接 (Demo简化：假设主要处理第一个视频)
+        time.sleep(1) # 假装在拼视频
+        TASKS[task_id]['progress'] = 30
+        
+        # -------------------------------------------------------
+        # 2. 核心逻辑：获取源视频路径
+        # 注意：这里需要根据你的实际情况定位文件。
+        # Demo 假设：我们处理的是 uploads 目录下的 demo.mp4 或者是 clips 里的第一个素材
+        # -------------------------------------------------------
+        input_filename = "demo.mp4" # 默认 fallback
+        
+        # 尝试从 clips 中解析出素材ID或路径 (这取决于你的素材库实现)
+        # 这里为了演示滤镜，我们简化逻辑：如果有 demo.mp4 就用 demo.mp4
+        input_full_path = os.path.join(base_dir, 'uploads', input_filename)
+        
+        # 如果文件不存在，尝试找一下 uploads/videos 下的文件 (根据你之前的日志)
+        if not os.path.exists(input_full_path):
+             # 尝试寻找 materials 目录
+             input_full_path = os.path.join(base_dir, 'uploads', 'materials', 'videos', 'demo2.mp4')
+
+        if not os.path.exists(input_full_path):
+            raise Exception(f"源视频文件未找到: {input_full_path}")
+
+        TASKS[task_id]['progress'] = 50
+        print(f"🎬 [Task {task_id}] 源文件: {input_full_path}")
+        print(f"🎨 [Task {task_id}] 应用滤镜: {filter_type} (强度: {filter_intensity})")
+
+        # 3. 核心逻辑：应用滤镜
+        # 生成输出路径
+        filename = os.path.basename(input_full_path)
+        name, ext = os.path.splitext(filename)
+        output_filename = f"final_{task_id}_{filter_type}{ext}"
+        output_full_path = os.path.join(base_dir, 'uploads', 'outputs', output_filename)
+        
+        # 确保输出目录存在
+        os.makedirs(os.path.dirname(output_full_path), exist_ok=True)
+
+        # 调用我们之前写的 VideoFilterProcessor
+        success, msg = VideoFilterProcessor.apply_filter(
+            input_full_path,
+            output_full_path,
+            filter_type
+        )
+        
+        if not success:
+            raise Exception(f"滤镜渲染失败: {msg}")
+
+        TASKS[task_id]['progress'] = 90
+        
+        # 4. 生成可访问的 URL
+        # 假设静态资源目录配置正确
+        rel_path = os.path.relpath(output_full_path, base_dir)
+        result_url = "/" + rel_path.replace("\\", "/")
+        
+        TASKS[task_id]['result_url'] = result_url
+        TASKS[task_id]['status'] = 'success'
+        TASKS[task_id]['progress'] = 100
+        print(f"✅ [Task {task_id}] 处理完成: {result_url}")
+
+    except Exception as e:
+        print(f"❌ [Task {task_id}] 失败: {str(e)}")
+        TASKS[task_id]['status'] = 'fail'
+        TASKS[task_id]['error_message'] = str(e)
 
 
 @video_editor_bp.route('/projects', methods=['GET'])
@@ -698,43 +787,116 @@ def ai_subtitle():
 @login_required
 def ai_filter():
     """
-    AI滤镜美化接口
-    
-    请求方法: POST
-    路径: /api/video-editor/ai/filter
-    认证: 需要登录
-    
-    请求体 (JSON):
-        {
-            "project_id": int,             # 必填，项目ID
-            "video_id": int,              # 必填，视频ID
-            "options": {
-                "filter_type": "string",  # 可选，滤镜类型（beauty/color/cinematic）
-                "intensity": float        # 可选，强度（0.0-1.0），默认 0.5
-            }
-        }
-    
-    返回数据:
-        成功 (200):
-        {
-            "code": 200,
-            "message": "Filter applied",
-            "data": {
-                "task_id": int,
-                "status": "processing"
-            }
-        }
-    
-    说明:
-        - 应用AI滤镜美化视频
-        - 支持多种滤镜效果
+    同步滤镜接口（用于前端快速预览，无需修改）
     """
-    # TODO: 实现AI滤镜美化功能
-    # 1. 验证请求参数
-    # 2. 调用AI滤镜服务
-    # 3. 创建滤镜任务
-    # 4. 返回任务信息
-    return response_error('功能待实现', 501)
+    data = request.json or {}
+    video_path = data.get('video_path')
+    options = data.get('options', {})
+    filter_type = options.get('filter_type') or data.get('filter_type')
+    
+    if not video_path or not filter_type:
+        return response_error("缺少参数", 400)
+
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    clean_relative_path = video_path.lstrip('/')
+    input_full_path = os.path.join(base_dir, clean_relative_path)
+    
+    if not os.path.exists(input_full_path):
+        return response_error(f"原视频文件不存在: {input_full_path}", 404)
+
+    dir_name = os.path.dirname(input_full_path)
+    file_name = os.path.basename(input_full_path)
+    name, ext = os.path.splitext(file_name)
+    new_filename = f"{name}_{filter_type}_{int(time.time())}{ext}"
+    output_full_path = os.path.join(dir_name, new_filename)
+    
+    success, msg = VideoFilterProcessor.apply_filter(input_full_path, output_full_path, filter_type)
+    
+    if success:
+        rel_path = os.path.relpath(output_full_path, base_dir)
+        new_url = "/" + rel_path.replace("\\", "/")
+        return response_success({
+            "code": 200, 
+            "message": "Filter applied", 
+            "data": {"status": "finished", "new_video_url": new_url, "filter_type": filter_type}
+        })
+    else:
+        return response_error(f"处理失败: {msg}", 500)
+
+
+@video_editor_bp.route('/edit_async', methods=['POST'])
+@login_required
+def edit_video_async():
+    """
+    【核心修改】异步视频剪辑接口
+    前端点击“一键生成”时调用此接口
+    """
+    data = request.json or {}
+    
+    # 1. 接收滤镜参数
+    # 这些参数是你在 VideoEditorView.vue handleGenerate 中新增发送的
+    filter_type = data.get('filter_type', 'original')
+    filter_intensity = data.get('filter_intensity', 1.0)
+    
+    print(f"📥 收到剪辑请求 - 滤镜: {filter_type}, 强度: {filter_intensity}")
+
+    # 2. 生成任务 ID
+    task_id = str(uuid.uuid4())
+    
+    # 3. 初始化任务状态
+    TASKS[task_id] = {
+        'id': task_id,
+        'status': 'pending',
+        'progress': 0,
+        'created_at': datetime.now().isoformat(),
+        'filter_type': filter_type # 记录一下
+    }
+    
+    # 4. 启动后台线程处理 (模拟 Celery)
+    # 获取项目根目录传给线程
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    
+    thread = threading.Thread(
+        target=_background_edit_process, 
+        args=(task_id, data, base_dir)
+    )
+    thread.daemon = True # 设置为守护线程，防止阻塞主进程退出
+    thread.start()
+    
+    # 5. 立即返回 task_id 给前端
+    return response_success({
+        "task_id": task_id,
+        "status": "pending",
+        "message": "Task created successfully"
+    })
+
+
+@video_editor_bp.route('/tasks/<task_id>', methods=['GET'])
+@login_required
+def get_task_status_by_id(task_id):
+    """
+    【核心修改】任务状态查询接口
+    前端轮询此接口获取进度
+    """
+    # 注意：这里参数类型改为 string，因为 uuid 是字符串
+    # 或者是保持 int 如果你的系统全是 int id，但我建议用 uuid 避免冲突
+    
+    task_id_str = str(task_id)
+    task = TASKS.get(task_id_str)
+    
+    if not task:
+        # 为了兼容 int 类型 ID 的旧任务或者模拟数据
+        return response_error("Task not found", 404)
+        
+    response_data = {
+        "id": task_id,
+        "status": task.get('status'),
+        "progress": task.get('progress', 0),
+        "preview_url": task.get('result_url'), # 成功后会有这个字段
+        "error_message": task.get('error_message')
+    }
+    
+    return response_success(response_data)
 
 
 @video_editor_bp.route('/ai/music', methods=['POST'])

@@ -41,6 +41,7 @@ class VideoEditor:
         target_width: int = 1080,
         target_height: int = 1920,
         target_fps: int = 30,
+        subtitle_params: Optional[dict] = None,
     ):
         """
         Mixed clips path (image+video): use concat *filter* instead of concat demuxer to avoid
@@ -64,29 +65,75 @@ class VideoEditor:
                 pass
             return (None, None)
 
-        def _subtitle_style_for_min_dim(min_dim):
+        def _subtitle_style_for_min_dim(min_dim, custom_params=None):
+            """生成字幕样式字符串，支持自定义参数"""
             try:
                 d = int(min_dim or 0)
             except Exception:
                 d = 0
 
+            # 默认字号计算
             if d <= 0:
-                font_size = 13
+                default_font_size = 13
             else:
-                font_size = round(d * 0.0125)
-                font_size = max(12, min(28, font_size))
+                default_font_size = round(d * 0.0125)
+                default_font_size = max(12, min(28, default_font_size))
 
-            outline = max(1, min(4, round(font_size / 18)))
-            shadow = max(1, min(4, round(font_size / 24)))
-            margin_v = 40
-            if d > 0:
-                try:
-                    margin_v = max(20, min(80, round(d * 0.05)))
-                except Exception:
-                    margin_v = 40
+            # 如果有自定义参数，使用自定义参数
+            if custom_params:
+                # 字号映射
+                size_map = {"small": 48, "medium": 72, "large": 96}
+                size_key = custom_params.get("subtitleFontSize", "medium")
+                if str(size_key).isdigit():
+                    font_size = int(size_key)
+                else:
+                    font_size = size_map.get(size_key, 72)
+                
+                # 颜色处理（#RRGGBB -> &H00BBGGRR）
+                def hex_to_ass(hex_str):
+                    if not hex_str or not hex_str.startswith("#"):
+                        return "&H00FFFFFF"
+                    try:
+                        hex_val = hex_str.lstrip("#").upper()
+                        if len(hex_val) == 6:
+                            r, g, b = hex_val[0:2], hex_val[2:4], hex_val[4:6]
+                            return f"&H00{b}{g}{r}"
+                    except Exception:
+                        pass
+                    return "&H00FFFFFF"
+                
+                primary_color = hex_to_ass(custom_params.get("subtitleColor", "#FFFFFF"))
+                outline_color = hex_to_ass(custom_params.get("subtitleOutlineColor", "#000000"))
+                
+                # 位置映射（1080p画布）
+                pos_map = {"top": 900, "middle": 540, "bottom": 180}
+                pos_key = custom_params.get("subtitleY", "bottom")
+                if str(pos_key).replace(".", "", 1).isdigit():
+                    margin_v = int((1 - float(pos_key)) * 1080)
+                else:
+                    margin_v = pos_map.get(pos_key, 180)
+                
+                outline = 2
+                shadow = 0
+            else:
+                # 使用默认样式
+                font_size = default_font_size
+                primary_color = "&H00FFFFFF"
+                outline_color = "&H00000000"
+                outline = max(1, min(4, round(font_size / 18)))
+                shadow = max(1, min(4, round(font_size / 24)))
+                margin_v = 40
+                if d > 0:
+                    try:
+                        margin_v = max(20, min(80, round(d * 0.05)))
+                    except Exception:
+                        margin_v = 40
+            
             return (
                 "FontName=Microsoft YaHei"
                 f",FontSize={font_size}"
+                f",PrimaryColour={primary_color}"
+                f",OutlineColour={outline_color}"
                 f",Outline={outline}"
                 f",Shadow={shadow}"
                 ",Alignment=2"
@@ -167,7 +214,7 @@ class VideoEditor:
             min_dim = first_w
         elif first_h:
             min_dim = first_h
-        sub_style = _subtitle_style_for_min_dim(min_dim)
+        sub_style = _subtitle_style_for_min_dim(min_dim, subtitle_params)
 
         try:
             # Build per-clip normalized video streams
@@ -294,6 +341,7 @@ class VideoEditor:
         bgm_volume: float = 0.25,
         voice_volume: float = 1.0,
         output_name: Optional[str] = None,
+        subtitle_params: Optional[dict] = None,
     ):
         """
         最简剪辑逻辑：拼接视频+添加BGM+调速
@@ -326,34 +374,75 @@ class VideoEditor:
                 pass
             return (None, None)
 
-        def _subtitle_style_for_min_dim(min_dim):
-            # Scale subtitle size by the smaller video dimension.
-            # Using height makes portrait videos (e.g. 1080x1920) look oversized.
-            # For min_dim=1080 => ~27, min_dim=720 => ~18.
+        def _subtitle_style_for_min_dim(min_dim, custom_params=None):
+            """生成字幕样式字符串，支持自定义参数"""
             try:
                 d = int(min_dim or 0)
             except Exception:
                 d = 0
 
-            # Halve the current subtitle size baseline.
+            # 默认字号计算
             if d <= 0:
-                font_size = 13
+                default_font_size = 13
             else:
-                font_size = round(d * 0.0125)
-                font_size = max(12, min(28, font_size))
+                default_font_size = round(d * 0.0125)
+                default_font_size = max(12, min(28, default_font_size))
 
-            outline = max(1, min(4, round(font_size / 18)))
-            shadow = max(1, min(4, round(font_size / 24)))
-            # TV-like: bottom-center, with a reasonable bottom margin.
-            margin_v = 40
-            if d > 0:
-                try:
-                    margin_v = max(20, min(80, round(d * 0.05)))
-                except Exception:
-                    margin_v = 40
+            # 如果有自定义参数，使用自定义参数
+            if custom_params:
+                # 字号映射
+                size_map = {"small": 48, "medium": 72, "large": 96}
+                size_key = custom_params.get("subtitleFontSize", "medium")
+                if str(size_key).isdigit():
+                    font_size = int(size_key)
+                else:
+                    font_size = size_map.get(size_key, 72)
+                
+                # 颜色处理（#RRGGBB -> &H00BBGGRR）
+                def hex_to_ass(hex_str):
+                    if not hex_str or not hex_str.startswith("#"):
+                        return "&H00FFFFFF"
+                    try:
+                        hex_val = hex_str.lstrip("#").upper()
+                        if len(hex_val) == 6:
+                            r, g, b = hex_val[0:2], hex_val[2:4], hex_val[4:6]
+                            return f"&H00{b}{g}{r}"
+                    except Exception:
+                        pass
+                    return "&H00FFFFFF"
+                
+                primary_color = hex_to_ass(custom_params.get("subtitleColor", "#FFFFFF"))
+                outline_color = hex_to_ass(custom_params.get("subtitleOutlineColor", "#000000"))
+                
+                # 位置映射（1080p画布）
+                pos_map = {"top": 900, "middle": 540, "bottom": 180}
+                pos_key = custom_params.get("subtitleY", "bottom")
+                if str(pos_key).replace(".", "", 1).isdigit():
+                    margin_v = int((1 - float(pos_key)) * 1080)
+                else:
+                    margin_v = pos_map.get(pos_key, 180)
+                
+                outline = 2
+                shadow = 0
+            else:
+                # 使用默认样式
+                font_size = default_font_size
+                primary_color = "&H00FFFFFF"
+                outline_color = "&H00000000"
+                outline = max(1, min(4, round(font_size / 18)))
+                shadow = max(1, min(4, round(font_size / 24)))
+                margin_v = 40
+                if d > 0:
+                    try:
+                        margin_v = max(20, min(80, round(d * 0.05)))
+                    except Exception:
+                        margin_v = 40
+            
             return (
                 "FontName=Microsoft YaHei"
                 f",FontSize={font_size}"
+                f",PrimaryColour={primary_color}"
+                f",OutlineColour={outline_color}"
                 f",Outline={outline}"
                 f",Shadow={shadow}"
                 ",Alignment=2"
@@ -495,7 +584,7 @@ class VideoEditor:
                 min_dim = first_w
             elif first_h:
                 min_dim = first_h
-            sub_style = _subtitle_style_for_min_dim(min_dim)
+            sub_style = _subtitle_style_for_min_dim(min_dim, subtitle_params)
 
             # 视频滤镜链（用 -vf，避免 filter_complex 下 Windows 字幕路径转义坑）
             vf_parts: List[str] = []

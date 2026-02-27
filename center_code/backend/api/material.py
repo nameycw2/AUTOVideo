@@ -63,6 +63,15 @@ def allowed_file(filename, file_type='video'):
     return False
 
 
+@material_bp.route('/material/upload', methods=['GET'])
+def upload_material_help():
+    """友好的 GET 提示：告诉客户端应使用 POST 上传文件"""
+    return response_error(
+        '请使用 POST multipart/form-data 调用 /api/material/upload，字段名为 file，用于上传素材文件',
+        405
+    )
+
+
 @material_bp.route('/material/upload', methods=['POST'])
 @login_required
 def upload_material():
@@ -395,6 +404,7 @@ def get_materials():
     """
     try:
         material_type = request.args.get('type')
+        include_invalid = request.args.get('include_invalid', 'false').lower() == 'true'  # 是否包含无效素材
         
         with get_db() as db:
             query = db.query(Material)
@@ -405,13 +415,47 @@ def get_materials():
             materials = query.order_by(Material.created_at.desc()).all()
             
             materials_list = []
+            skipped_count = 0
+            
             for mat in materials:
                 # 确保 type 字段是小写，统一格式
                 mat_type = (mat.type or '').lower() if mat.type else None
+                
+                # 生成访问URL
+                url = None
+                file_exists = False
+                
+                if mat.path:
+                    # 检查本地文件是否存在
+                    abs_path = os.path.join(BASE_DIR, mat.path)
+                    file_exists = os.path.exists(abs_path)
+                    
+                    if file_exists:
+                        # 本地文件存在，使用本地URL（通过 /uploads 路由访问）
+                        rel_to_uploads = os.path.relpath(abs_path, UPLOAD_ROOT).replace(os.sep, '/')
+                        url = f"/uploads/{rel_to_uploads}"
+                    else:
+                        # 本地文件不存在，尝试生成COS URL
+                        try:
+                            from utils.cos_service import get_file_url
+                            # 假设文件在COS上的key与本地path结构一致
+                            cos_key = mat.path.replace('uploads/', '', 1).replace(os.sep, '/')
+                            url = get_file_url(cos_key)
+                        except Exception:
+                            # 如果无法获取COS URL，使用原始path（兼容性）
+                            url = mat.path
+                
+                # 如果不包含无效素材，且文件不存在，则跳过
+                if not include_invalid and not file_exists:
+                    skipped_count += 1
+                    continue
+                
                 materials_list.append({
                     'id': mat.id,
                     'name': mat.name,
                     'path': mat.path or '',
+                    'url': url,  # 可访问的URL（本地或云端）
+                    'file_exists': file_exists,  # 新增：文件是否存在
                     'type': mat_type,  # 统一转换为小写
                     'status': getattr(mat, 'status', None) or 'ready',
                     'original_path': getattr(mat, 'original_path', None),
@@ -423,6 +467,11 @@ def get_materials():
                     'created_at': mat.created_at.isoformat() if mat.created_at else None,
                     'create_time': mat.created_at.isoformat() if mat.created_at else None  # 兼容字段
                 })
+            
+            if skipped_count > 0:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"已过滤 {skipped_count} 个文件不存在的素材")
         
         return response_success(materials_list, '获取素材列表成功')
     
@@ -666,4 +715,134 @@ def delete_material():
     
     except Exception as e:
         return response_error(str(e), 500)
+
+
+@material_bp.route('/materials/clean-invalid', methods=['POST'])
+@login_required
+def clean_invalid_materials():
+    """
+    清理无效的素材记录（文件不存在的记录）
+    
+    请求方法: POST
+    路径: /api/materials/clean-invalid
+    认证: 需要登录
+    
+    请求体 (JSON):
+        {
+            "dry_run": bool  # 可选，true=仅检查不删除，false=执行删除（默认true）
+        }
+    
+    返回数据:
+        成功 (200):
+        {
+            "code": 200,
+            "message": "ok",
+            "data": {
+                "total_materials": int,      # 总素材数
+                "invalid_count": int,        # 无效素材数
+                "deleted_count": int,        # 已删除数量
+                "invalid_list": [            # 无效素材列表（最多返回20条）
+                    {
+                        "id": int,
+                        "name": "string",
+                        "path": "string",
+                        "type": "string"
+                    }
+                ]
+            }
+        }
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        data = request.get_json() or {}
+        dry_run = data.get('dry_run', True)  # 默认为仅检查模式
+        
+        with get_db() as db:
+            # 查询所有素材
+            all_materials = db.query(Material).all()
+            total_count = len(all_materials)
+            
+            logger.info(f"开始清理无效素材，共 {total_count} 条记录，模式: {'仅检查' if dry_run else '删除'}")
+            
+            if total_count == 0:
+                return response_success({
+                    'total_materials': 0,
+                    'invalid_count': 0,
+                    'deleted_count': 0,
+                    'invalid_list': []
+                }, '没有找到任何素材记录')
+            
+            invalid_materials = []
+            invalid_list = []
+            
+            for mat in all_materials:
+                is_invalid = False
+                
+                if not mat.path:
+                    is_invalid = True
+                    logger.warning(f"素材 ID={mat.id} 没有路径信息")
+                else:
+                    # 检查文件是否存在
+                    abs_path = os.path.join(BASE_DIR, mat.path)
+                    if not os.path.exists(abs_path):
+                        is_invalid = True
+                        logger.info(f"素材 ID={mat.id} 文件不存在: {abs_path}")
+                
+                if is_invalid:
+                    invalid_materials.append(mat)
+                    # 只返回前20条详细信息
+                    if len(invalid_list) < 20:
+                        invalid_list.append({
+                            'id': mat.id,
+                            'name': mat.name,
+                            'path': mat.path or '',
+                            'type': mat.type
+                        })
+            
+            invalid_count = len(invalid_materials)
+            deleted_count = 0
+            
+            if invalid_count == 0:
+                logger.info("所有素材文件都存在，无需清理")
+                return response_success({
+                    'total_materials': total_count,
+                    'invalid_count': 0,
+                    'deleted_count': 0,
+                    'invalid_list': []
+                }, '所有素材文件都存在，无需清理')
+            
+            # 如果不是仅检查模式，执行删除
+            if not dry_run:
+                logger.info(f"开始删除 {invalid_count} 条无效素材记录")
+                for mat in invalid_materials:
+                    try:
+                        db.delete(mat)
+                        deleted_count += 1
+                    except Exception as e:
+                        logger.error(f"删除素材 ID={mat.id} 失败: {e}")
+                
+                db.commit()
+                logger.info(f"成功删除 {deleted_count} 条无效素材记录")
+                
+                return response_success({
+                    'total_materials': total_count,
+                    'invalid_count': invalid_count,
+                    'deleted_count': deleted_count,
+                    'invalid_list': invalid_list
+                }, f'成功删除 {deleted_count} 条无效素材记录')
+            else:
+                # 仅检查模式
+                logger.info(f"发现 {invalid_count} 条无效素材记录（仅检查模式）")
+                return response_success({
+                    'total_materials': total_count,
+                    'invalid_count': invalid_count,
+                    'deleted_count': 0,
+                    'invalid_list': invalid_list
+                }, f'发现 {invalid_count} 条无效素材记录（仅检查模式）')
+    
+    except Exception as e:
+        logger.exception("清理无效素材失败")
+        return response_error(f'清理失败：{str(e)}', 500)
 

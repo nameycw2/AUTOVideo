@@ -271,6 +271,8 @@ class VideoEditTask(Base):
     bgm_id = Column(Integer, nullable=True)  # BGM音频ID
     speed = Column(Float, default=1.0)  # 播放速度（1.0=正常速度）
     subtitle_path = Column(String(1000), nullable=True)  # 字幕文件路径
+    filter_type = Column(String(50), nullable=True)  # 滤镜类型（vintage/noir/cyberpunk等）
+    filter_intensity = Column(Float, default=1.0)  # 滤镜强度（0.0-1.0）
     output_path = Column(String(1000), nullable=True)  # 输出文件路径（相对路径）
     output_filename = Column(String(255), nullable=True)  # 输出文件名
     preview_url = Column(String(1000), nullable=True)  # 预览URL

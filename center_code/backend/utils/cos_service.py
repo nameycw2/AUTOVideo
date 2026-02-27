@@ -32,6 +32,8 @@ def get_cos_client():
     global _cos_client
     
     if _cos_client is None:
+        # 添加此行调试日志
+        print(f"--- [COS 调试] ID: {COS_SECRET_ID}, Bucket: {COS_BUCKET}")
         if not COS_SECRET_ID or not COS_SECRET_KEY or not COS_BUCKET:
             raise ValueError("COS配置不完整，请设置COS_SECRET_ID、COS_SECRET_KEY和COS_BUCKET")
         
@@ -99,7 +101,8 @@ def upload_file_to_cos(local_file_path: str, cos_key: str, content_type: Optiona
                 Bucket=COS_BUCKET,
                 Body=fp,
                 Key=cos_key,
-                ContentType=content_type
+                ContentType=content_type,
+                ACL='public-read'  # 设置为公共读，确保可访问
             )
         
         # 生成文件URL（对于私有存储桶，使用预签名URL）
@@ -188,7 +191,8 @@ def upload_file_data_to_cos(file_data: bytes, cos_key: str, content_type: Option
             Bucket=COS_BUCKET,
             Body=file_data,
             Key=cos_key,
-            ContentType=content_type
+            ContentType=content_type,
+            ACL='public-read'  # 设置为公共读，确保可访问
         )
         
         # 生成文件URL

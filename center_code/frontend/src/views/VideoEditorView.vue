@@ -492,103 +492,233 @@
         </div>
       </div>
 
-      <!-- 输出设置 -->
+      <!-- AI 滤镜风格 -->
       <div class="edit-section">
         <div class="section-header">
           <div class="section-title">
             <svg class="section-icon" viewBox="0 0 24 24" fill="none">
-              <path d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-              <rect x="2" y="6" width="20" height="12" rx="2" stroke="currentColor" stroke-width="2"/>
+              <path d="M19.5 12c.8 0 1.5.7 1.5 1.5v6c0 .8-.7 1.5-1.5 1.5h-15c-.8 0-1.5-.7-1.5-1.5v-6c0-.8.7-1.5 1.5-1.5h15zM12 2L4 9h16l-8-7z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
             </svg>
-            <span>输出设置</span>
+            <span>AI 滤镜风格</span>
           </div>
+          <div class="section-hint">所见即所得，导出时自动渲染</div>
         </div>
         <div class="panel edit-panel">
-          <div class="edit-row">
-            <div class="edit-field">
-              <div class="field-label">分辨率</div>
-              <select v-model="editForm.resolution" class="select">
-                <option value="auto">自动</option>
-                <option value="1080p">1080p</option>
-                <option value="720p">720p</option>
-              </select>
-            </div>
-            <div class="edit-field">
-              <div class="field-label">视频比例</div>
-              <select v-model="editForm.ratio" class="select">
-                <option value="auto">自动</option>
-                <option value="16:9">16:9</option>
-                <option value="9:16">9:16</option>
-                <option value="1:1">1:1</option>
-              </select>
-            </div>
-            <div class="edit-field">
-              <div class="field-label">播放速度</div>
-              <select v-model.number="editForm.speed" class="select">
-                <option :value="1">1.0x</option>
-                <option :value="0.75">0.75x</option>
-                <option :value="1.25">1.25x</option>
-                <option :value="1.5">1.5x</option>
-                <option :value="2">2.0x</option>
-              </select>
+          <div class="filter-grid">
+            <div 
+              v-for="filter in filterOptions" 
+              :key="filter.value"
+              class="filter-item"
+              :class="{ active: editForm.filter === filter.value }"
+              @click="editForm.filter = filter.value"
+            >
+              <div class="filter-preview-box" :style="getThumbStyle(filter.value)">
+                <span>Aa</span>
+              </div>
+              <span class="filter-name">{{ filter.label }}</span>
             </div>
           </div>
-          <div class="edit-row" style="margin-top:16px;padding-top:16px;border-top:1px solid #f0f0f0;">
+          
+          <div class="edit-row" v-if="editForm.filter !== 'original'" style="margin-top: 16px; padding-top: 16px; border-top: 1px dashed #eee;">
             <div class="edit-field full-width">
-              <div class="field-label">字幕设置</div>
-              <div class="subtitle-options">
-                <label class="checkbox-label">
-                  <input 
-                    v-model="editForm.subtitleEnabled" 
-                    type="checkbox"
-                    class="checkbox-input"
-                  />
-                  <span class="checkbox-text">生成并烧录字幕（需要已选择配音音频）</span>
-                </label>
-                <div class="subtitle-actions">
-                  <button class="btn btn-secondary" @click="handleSubPreview" type="button">
-                    <svg class="btn-icon" viewBox="0 0 24 24" fill="none">
-                      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                      <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                    <span>生成字幕预览</span>
-                  </button>
-                  <a 
-                    v-if="subtitleUrl" 
-                    class="btn btn-secondary" 
-                    :href="subtitleUrl" 
-                    target="_blank"
-                  >
-                    <svg class="btn-icon" viewBox="0 0 24 24" fill="none">
-                      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                    <span>下载SRT</span>
-                  </a>
-                </div>
-                <!-- 字幕预览显示 -->
-                <div v-if="subtitleUrl" class="subtitle-preview">
-                  <div class="subtitle-preview-header">
-                    <svg class="subtitle-icon" viewBox="0 0 24 24" fill="none">
-                      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                      <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                    <span class="subtitle-preview-title">字幕预览</span>
-                    <span class="subtitle-status-badge">已生成</span>
-                  </div>
-                  <div v-if="recognizedText" class="subtitle-text-preview">
-                    <div class="subtitle-text-label">识别内容：</div>
-                    <div class="subtitle-text-content">{{ recognizedText }}</div>
-                  </div>
-                  <div class="subtitle-file-info">
-                    <span class="subtitle-file-label">字幕文件：</span>
-                    <span class="subtitle-file-name">{{ subtitleUrl.split('/').pop() }}</span>
-                  </div>
-                </div>
+              <div class="field-label">滤镜强度 ({{ editForm.filterIntensity }})</div>
+              <div class="range-wrapper">
+                <input 
+                  v-model.number="editForm.filterIntensity" 
+                  class="range-input" 
+                  type="range" 
+                  min="0" 
+                  max="1" 
+                  step="0.1"
+                />
               </div>
             </div>
           </div>
         </div>
+      </div>  
+
+
+      <!-- 输出设置 -->
+<div class="edit-section">
+  <div class="section-header">
+    <div class="section-title">
+      <svg class="section-icon" viewBox="0 0 24 24" fill="none">
+        <path d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <rect x="2" y="6" width="20" height="12" rx="2" stroke="currentColor" stroke-width="2"/>
+      </svg>
+      <span>输出设置</span>
+    </div>
+  </div>
+  <div class="panel edit-panel">
+    <div class="edit-row">
+      <div class="edit-field">
+        <div class="field-label">分辨率</div>
+        <select v-model="editForm.resolution" class="select">
+          <option value="auto">自动</option>
+          <option value="1080p">1080p</option>
+          <option value="720p">720p</option>
+        </select>
       </div>
+      <div class="edit-field">
+        <div class="field-label">视频比例</div>
+        <select v-model="editForm.ratio" class="select">
+          <option value="auto">自动</option>
+          <option value="16:9">16:9</option>
+          <option value="9:16">9:16</option>
+          <option value="1:1">1:1</option>
+        </select>
+      </div>
+      <div class="edit-field">
+        <div class="field-label">播放速度</div>
+        <select v-model.number="editForm.speed" class="select">
+          <option :value="1">1.0x</option>
+          <option :value="0.75">0.75x</option>
+          <option :value="1.25">1.25x</option>
+          <option :value="1.5">1.5x</option>
+          <option :value="2">2.0x</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="edit-row" style="margin-top:16px;padding-top:16px;border-top:1px solid #f0f0f0;">
+      <div class="edit-field full-width">
+        <div class="field-label">字幕设置</div>
+        <div class="subtitle-options">
+          <label class="checkbox-label">
+            <input 
+              v-model="editForm.subtitleEnabled" 
+              type="checkbox"
+              class="checkbox-input"
+            />
+            <span class="checkbox-text">生成并烧录字幕（需要已选择配音音频）</span>
+          </label>
+
+          <div class="subtitle-actions" v-if="editForm.subtitleEnabled">
+            <button class="btn btn-secondary" @click="handleSubPreview" type="button">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span>生成字幕预览</span>
+            </button>
+            <a v-if="subtitleUrl" class="btn btn-secondary" :href="subtitleUrl" target="_blank">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span>下载SRT</span>
+            </a>
+          </div>
+
+          <div v-if="subtitleUrl" class="subtitle-preview">
+            <div class="subtitle-preview-header">
+              <svg class="subtitle-icon" viewBox="0 0 24 24" fill="none">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span class="subtitle-preview-title">字幕预览</span>
+              <span class="subtitle-status-badge">已生成</span>
+            </div>
+            <div v-if="recognizedText" class="subtitle-text-preview">
+              <div class="subtitle-text-label">识别内容：</div>
+              <div class="subtitle-text-content">{{ recognizedText }}</div>
+            </div>
+          </div>
+
+          <div v-if="editForm.subtitleEnabled" class="ims-subtitle-effects" style="margin-top:16px; padding:16px; background:#f9f9f9; border-radius:8px; border:1px dashed #dcdfe6;">
+            <div class="field-label" style="font-weight:bold; color:#409EFF; margin-bottom:12px; display:flex; align-items:center;">
+              <svg style="width:16px;height:16px;margin-right:6px;" viewBox="0 0 24 24" fill="none">
+                <path d="M12 21a9 9 0 1 1 0-18 9 9 0 0 1 0 18zM18 17H6M21 7H3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+              字幕特效 (IMS)
+            </div>
+
+            <!-- 1. 预设风格 -->
+            <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:#606266">1. 预设风格</div>
+            <div class="style-presets" style="display:flex; gap:10px; overflow-x:auto; padding-bottom:8px; margin-bottom:16px;">
+              <div 
+                v-for="style in subtitlePresets" 
+                :key="style.id" 
+                class="preset-card"
+                @click="selectSubtitlePreset(style)"
+                style="border:1px solid #ddd; border-radius:6px; padding:8px; cursor:pointer; min-width:80px; text-align:center; background:#fff; transition:all 0.2s;"
+                :style="editForm.subtitlePreset === style.id ? `border-color:${style.fontColor};box-shadow:0 2px 8px rgba(0,0,0,0.1);transform:translateY(-2px)` : ''"
+              >
+                <div class="preset-preview" :style="{background: '#333', color: style.fontColor, fontSize: '14px', fontWeight:'bold', padding: '8px', borderRadius:'4px', marginBottom:'4px'}">Aa</div>
+                <div style="font-size:12px; color:#606266">{{ style.name }}</div>
+              </div>
+            </div>
+
+            <!-- 2. 微调样式 (档位控制) -->
+            <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:#606266">2. 微调样式</div>
+            <div class="edit-row" style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-bottom:12px;">
+              <!-- 字体大小 (Radio Group) -->
+              <div class="edit-field">
+                <div class="field-label" style="margin-bottom:6px">字号</div>
+                <div class="radio-group">
+                  <label class="radio-label" :class="{active: editForm.subtitleFontSize === 'small'}">
+                    <input type="radio" v-model="editForm.subtitleFontSize" value="small"> 小
+                  </label>
+                  <label class="radio-label" :class="{active: editForm.subtitleFontSize === 'medium'}">
+                    <input type="radio" v-model="editForm.subtitleFontSize" value="medium"> 中
+                  </label>
+                  <label class="radio-label" :class="{active: editForm.subtitleFontSize === 'large'}">
+                    <input type="radio" v-model="editForm.subtitleFontSize" value="large"> 大
+                  </label>
+                </div>
+              </div>
+              
+              <!-- 垂直位置 (Radio Group) -->
+              <div class="edit-field">
+                <div class="field-label" style="margin-bottom:6px">位置</div>
+                <div class="radio-group">
+                  <label class="radio-label" :class="{active: editForm.subtitleY === 'top'}">
+                    <input type="radio" v-model="editForm.subtitleY" value="top"> 顶部
+                  </label>
+                  <label class="radio-label" :class="{active: editForm.subtitleY === 'middle'}">
+                    <input type="radio" v-model="editForm.subtitleY" value="middle"> 中间
+                  </label>
+                  <label class="radio-label" :class="{active: editForm.subtitleY === 'bottom'}">
+                    <input type="radio" v-model="editForm.subtitleY" value="bottom"> 底部
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <!-- 颜色选择与动画 -->
+            <div class="edit-row" style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+               <div class="edit-field">
+                <div class="field-label" style="margin-bottom:6px">字体颜色</div>
+                <div style="display:flex;align-items:center;border:1px solid #dcdfe6;padding:4px;border-radius:4px;background:#fff">
+                  <input type="color" v-model="editForm.subtitleColor" style="width:24px;height:24px;border:none;padding:0;background:none;cursor:pointer;margin-right:8px;" />
+                  <span style="font-size:12px;color:#606266;font-family:monospace">{{ editForm.subtitleColor }}</span>
+                </div>
+              </div>
+              <div class="edit-field">
+                <div class="field-label" style="margin-bottom:6px">描边颜色</div>
+                <div style="display:flex;align-items:center;border:1px solid #dcdfe6;padding:4px;border-radius:4px;background:#fff">
+                  <input type="color" v-model="editForm.subtitleOutlineColor" style="width:24px;height:24px;border:none;padding:0;background:none;cursor:pointer;margin-right:8px;" />
+                   <span style="font-size:12px;color:#606266;font-family:monospace">{{ editForm.subtitleOutlineColor }}</span>
+                </div>
+              </div>
+            </div>
+            
+             <div class="edit-row" style="margin-top:16px; padding-top:12px; border-top:1px solid #eee;">
+                  <button 
+                  class="btn btn-primary" 
+                  :disabled="isImsSubmitting"
+                  @click="handleImsSubmit"
+                  style="width:100%; justify-content:center; padding:10px;"
+                >
+                  <span v-if="isImsSubmitting" class="spinner" style="width:16px;height:16px;border-width:2px;margin-right:8px"></span>
+                  <span>{{ isImsSubmitting ? '正在提交云端渲染...' : '提交 IMS 渲染任务' }}</span>
+                </button>
+             </div>
+          </div>
+          </div>
+      </div>
+    </div>
+  </div>
+</div>
 
       <!-- 生成按钮和进度 -->
       <div class="edit-section">
@@ -636,10 +766,11 @@
             <video 
               ref="previewVideo"
               class="preview-video" 
+              :style="previewFilterStyle"  
               controls
               v-if="previewUrl"
+              :src="previewUrl"
             >
-              <source :src="previewUrl" type="video/mp4" />
               您的浏览器不支持HTML5视频播放，请更换浏览器后重试
             </video>
             <div v-else class="preview-placeholder">
@@ -654,7 +785,7 @@
                 v-if="exportUrl" 
                 class="btn btn-primary" 
                 :href="exportUrl" 
-                target="_blank"
+              target="_blank"
               >
                 <svg class="btn-icon" viewBox="0 0 24 24" fill="none">
                   <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -742,9 +873,6 @@
                 <div style="color:#8a94a3;font-size:12px;">
                   创建时间: {{ formatTime(task.create_time || task.update_time) }}
                 </div>
-                <div v-if="task.error_message" style="color:#f56c6c;font-size:12px;margin-top:4px;">
-                  错误: {{ task.error_message }}
-                </div>
               </div>
               <div style="display:flex;gap:8px;margin-left:16px;">
                 <button 
@@ -756,7 +884,7 @@
                   预览
                 </button>
                 <button 
-                  v-if="task.output_filename" 
+                  v-if="task.output_filename || task.preview_url" 
                   class="btn" 
                   @click="downloadTask(task)"
                   style="font-size:12px;padding:4px 12px;"
@@ -894,6 +1022,7 @@ import { ElMessage } from 'element-plus'
 import * as aiApi from '../api/ai'
 import * as editorApi from '../api/editor'
 import * as materialApi from '../api/material'
+import { submitImsTask } from '../api/editor' // 导入新 API
 
 const props = defineProps({
   materials: {
@@ -949,16 +1078,221 @@ const editForm = ref({
   resolution: 'auto',
   ratio: 'auto',
   speed: 1.0,
-  subtitleEnabled: false
+  subtitleEnabled: false,
+  enableSubtitle: false,
+
+  subtitlePreset: 'default',
+  subtitleFontSize: 'medium', // 默认从60改为medium
+  subtitleY: 'bottom',        // 默认从0.85改为bottom
+  subtitleColor: '#FFFFFF',
+  subtitleOutlineColor: '#000000',
+
+  // ✅ 新增
+  subtitleAnimation: 'none',
+
+  filter: 'original',
+  filterIntensity: 1.0
+})
+
+// --- IMS 字幕特效逻辑 ---
+const subtitlePresets = ref([
+ { id: 'default', name: '默认白字', fontColor: '#FFFFFF', shadow: '2px 2px 0 #000' },
+ { id: 'variety', name: '综艺黄字', fontColor: '#FFD700', shadow: '2px 2px 0 #FF4500' },
+ { id: 'movie', name: '电影质感', fontColor: '#E0E0E0', shadow: '1px 1px 2px #333' }
+])
+
+const isImsSubmitting = ref(false)
+
+const selectSubtitlePreset = (style) => {
+ editForm.value.subtitlePreset = style.id
+ if (style.id === 'variety') {
+    editForm.value.subtitleFontSize = 'large'
+    editForm.value.subtitleColor = '#FFD700'
+    editForm.value.subtitleOutlineColor = '#FF4500'
+ } else if (style.id === 'movie') {
+    editForm.value.subtitleFontSize = 'small'
+    editForm.value.subtitleColor = '#F0F0F0'
+    editForm.value.subtitleOutlineColor = '#000000'
+ } else {
+    editForm.value.subtitleFontSize = 'medium' 
+    editForm.value.subtitleColor = '#FFFFFF'
+    editForm.value.subtitleOutlineColor = '#000000'
+ }
+}
+
+const handleImsSubmit = async () => {
+  console.log("--- [IMS 提交校验开始] ---");
+
+  // 0. 检查素材列表是否有视频
+  const hasVideo = props.materials.some(m => m.type === 'video');
+  if (!hasVideo) {
+    console.error("❌ 素材列表中没有任何视频素材");
+    ElMessage.error({
+      message: '素材库中没有视频素材，请先上传视频文件到素材库',
+      duration: 5000,
+      showClose: true
+    });
+    return;
+  }
+
+  // 1. 获取轨道上的片段信息
+  const clip = props.timeline?.clips?.[0];
+  if (!clip) {
+    ElMessage.warning('请先添加视频素材到轨道');
+    return;
+  }
+
+  console.log("时间轴上的视频片段:", clip);
+
+  // 2. 从素材库查找完整信息（解决 clip 对象中缺少 url 的问题）
+  const materialInfo = props.materials.find(m => m.id === clip.materialId);
+  
+  // 检查素材是否存在
+  if (!materialInfo) {
+    console.error(`❌ 素材不存在：materialId=${clip.materialId}`);
+    console.log(`当前素材列表中的ID:`, props.materials.map(m => m.id));
+    ElMessage.error({
+      message: '时间轴上的视频素材已失效或被删除，请重新添加视频素材到时间轴',
+      duration: 5000,
+      showClose: true
+    });
+    return;
+  }
+  
+  console.log("找到的素材信息:", materialInfo);
+  
+  const videoUrl = (materialInfo?.url || materialInfo?.path || clip?.url || clip?.path || '').trim();
+  console.log("提取的视频URL:", videoUrl);
+  
+  const currentSubUrl = (subtitleUrl?.value || '').trim();
+  // --- ✅ 【新增/修改点 1】：提取配音 (Voice) 地址 ---
+  // 查找配音 ID (优先从时间轴找，没有就看本地临时状态)
+  const voiceId = props.timeline?.voice?.materialId || localVoiceState.value?.materialId;
+  const voiceMaterial = props.materials.find(m => m.id === voiceId);
+  // 定义 voiceUrl，解决 ReferenceError
+  const voiceUrl = (voiceMaterial?.url || voiceMaterial?.path || '').trim();
+
+  // --- ✅ 【新增/修改点 2】：提取 BGM 地址 ---
+  // 查找 BGM ID
+  const bgmId = props.timeline?.bgm?.materialId;
+  const bgmMaterial = props.materials.find(m => m.id === bgmId);
+  // 定义 bgmUrl，解决 ReferenceError
+  const bgmUrl = (bgmMaterial?.url || bgmMaterial?.path || '').trim();
+  // 4. 逻辑校验：拦截无效路径
+  if (!videoUrl) {
+    console.error("❌ 拦截原因：素材对象存在但URL为空");
+    console.error("素材详情:", materialInfo);
+    ElMessage.error({
+      message: '无法获取视频URL，该素材可能文件已损坏。请删除并重新上传视频',
+      duration: 5000,
+      showClose: true
+    });
+    return;
+  }
+// ✅ 新增：拦截未生成字幕的情况
+  if (!currentSubUrl) {
+    ElMessage.warning('请先点击“生成字幕预览”并确认已上传至云端');
+    return;
+  }
+
+  // 5. 校验通过，提交任务
+  isImsSubmitting.value = true;
+  try {
+    const payload = {
+      video_url: videoUrl,
+      subtitle_url: currentSubUrl,
+      voice_url: voiceUrl,
+      bgm_url: bgmUrl,
+      subtitle_params: {
+        subtitlePreset: editForm.value.subtitlePreset,
+        subtitleFontSize: editForm.value.subtitleFontSize,
+        subtitleColor: editForm.value.subtitleColor,
+        subtitleOutlineColor: editForm.value.subtitleOutlineColor,
+        subtitleY: editForm.value.subtitleY,
+        subtitleAnimation: editForm.value.subtitleAnimation
+      }
+    };
+
+    console.log("🚀 校验成功，发送 Payload:", payload);
+    const res = await submitImsTask(payload);
+
+    if (res.job_id || res.data?.job_id) {
+      const jobId = res.job_id || res.data.job_id;
+      ElMessage.success('IMS 任务已提交，JobID: ' + jobId);
+      // emit('open-outputs');
+    } else {
+      ElMessage.error(res.message || '提交失败，未获取到 JobID');
+    }
+  } catch (e) {
+    console.error('提交异常:', e);
+    ElMessage.error('接口请求失败，请检查后端服务');
+  } finally {
+    isImsSubmitting.value = false;
+  }
+};
+
+// 2. 定义滤镜列表 (复制进去)
+const filterOptions = [
+  { label: '原图', value: 'original' },
+  { label: '复古胶片', value: 'vintage' },
+  { label: '黑白纪实', value: 'noir' },
+  { label: '赛博朋克', value: 'cyberpunk' },
+  { label: '蓝调电影', value: 'cinematic' },
+  { label: '暖阳暗角', value: 'warm_vignette' },
+]
+
+// 3. 辅助函数：给滤镜小方块加预览样式 (可选)
+const getThumbStyle = (filterType) => {
+  if (filterType === 'original') return {}
+  // 复用计算属性逻辑生成缩略图样式
+  const mockIntensity = 0.8
+  const styles = {
+    'vintage': `sepia(${0.6 * mockIntensity}) contrast(1.1)`,
+    'noir': `grayscale(${1.0 * mockIntensity}) contrast(1.2)`,
+    'cyberpunk': `saturate(${1.5 * mockIntensity}) contrast(1.2) hue-rotate(-10deg)`,
+    'cinematic': `contrast(1.1) saturate(1.2)`,
+    'warm_vignette': `sepia(${0.3 * mockIntensity})`
+  }
+  return { filter: styles[filterType] || 'none' }
+}
+
+// --- 核心魔法：实时生成 CSS filter 字符串 ---
+const previewFilterStyle = computed(() => {
+  const f = editForm.value.filter
+  const i = Number(editForm.value.filterIntensity) || 0
+
+  // 如果是原图，返回空样式
+  if (!f || f === 'original') return {}
+
+  // 这里的公式要尽可能模拟后端 FFmpeg 的效果
+  switch (f) {
+    case 'vintage':
+      return { filter: `sepia(${0.6 * i}) contrast(1.1)` }
+    case 'noir':
+      return { filter: `grayscale(${1.0 * i}) contrast(1.2)` }
+    case 'cyberpunk':
+      // 赛博朋克：高饱和 + 色相偏移
+      return { filter: `saturate(${1.0 + 0.8 * i}) contrast(1.1) hue-rotate(${-10 * i}deg)` }
+    case 'cinematic':
+      // 蓝调：微弱对比度 + 饱和度提升
+      return { filter: `contrast(${1.0 + 0.1 * i}) saturate(${1.0 + 0.2 * i})` }
+    case 'warm_vignette':
+      // 暖阳：微弱的棕褐色 + 亮度微调
+      return { filter: `sepia(${0.3 * i}) brightness(1.05)` }
+    default:
+      return {}
+  }
 })
 
 const defaultImageDuration = ref(2.0)
 
+
 // 预览和进度
 const previewUrl = ref('')
 const exportUrl = ref('')
-const subtitleUrl = ref('')
 const recognizedText = ref('')  // 从音频识别的文字
+const subtitleUrl = ref('')      // 存 http 链接，给阿里云 IMS 用
+const subtitleLocalPath = ref('') // 存 uploads 路径，给本地 FFmpeg 用
 const progress = ref({ show: false, value: 0, text: '' })
 
 // 历史任务
@@ -1631,11 +1965,10 @@ function previewMaterial(material) {
 }
 
 async function handleSubPreview() {
-  // 检查配音是否存在
+  // 1. 检查配音是否存在
   let voice = props.timeline?.voice
   let voiceId = voice?.materialId
   
-  // 如果 props.timeline.voice 为空，尝试从本地状态获取（可能是更新延迟）
   if (!voiceId && localVoiceState.value) {
     voice = localVoiceState.value
     voiceId = localVoiceState.value.materialId
@@ -1646,51 +1979,64 @@ async function handleSubPreview() {
     return
   }
 
-  // 获取文案：优先使用当前文案，如果为空则自动从音频识别
+  // 2. 获取文案
   let text = getTtsText(500)
   if (!text) {
-    // 如果文案为空，自动从音频识别（不需要用户手动输入）
     ElMessage.info('正在从配音音频中识别文字...')
   }
 
   try {
-    // 如果文案为空，启用自动识别
     const autoRecognize = !text || text.trim().length === 0
     
+    // 3. 调用后端接口
     const response = await aiApi.generateSubtitle({
-      text: text || '',  // 即使为空也传递，后端会处理
+      text: text || '',
       audio_material_id: voiceId,
-      auto_recognize: autoRecognize  // 如果文案为空，自动从音频识别
+      auto_recognize: autoRecognize
     })
 
     if (response.code === 200) {
-      const url = response.data?.preview_url
+      // --- 关键数据分流提取 ---
+      const cloudUrl = response.data?.preview_url || response.data?.url // 可能是 http 链接
+      const localPath = response.data?.path // 永远是 uploads/subtitles/xxx.srt 相对路径
       const recognizedTextFromApi = response.data?.recognized_text
-      
-      // 如果是从音频识别的文字，保存到文案中
+
+      // A. 处理识别到的文字
       if (recognizedTextFromApi) {
         copyForm.value.output = recognizedTextFromApi
-        recognizedText.value = recognizedTextFromApi  // 保存到ref中用于显示预览
-        ElMessage.success(`已从配音识别出 ${recognizedTextFromApi.length} 字，并生成字幕`)
+        recognizedText.value = recognizedTextFromApi
+        ElMessage.success(`已从配音识别出 ${recognizedTextFromApi.length} 字`)
       }
-      
-      if (url) {
-        subtitleUrl.value = url
-        // 自动勾选字幕启用复选框
-        editForm.value.subtitleEnabled = true
-        if (!recognizedTextFromApi) {
-          ElMessage.success('字幕已生成，已自动启用字幕')
+
+      // B. 处理路径存储
+      if (cloudUrl) {
+        // 【关键修复】：存储本地路径，供“一键生成/本地剪辑”使用，防止路径非法报错
+        subtitleLocalPath.value = localPath || ''
+
+        console.log("--- [字幕路径分配] ---", { cloudUrl, localPath })
+
+        // 校验公网链接，供 IMS 渲染使用
+        if (cloudUrl.startsWith('http')) {
+          subtitleUrl.value = cloudUrl
+          editForm.value.subtitleEnabled = true
+          ElMessage.success('字幕已生成并成功同步至云端')
+        } else {
+          console.error("警告：后端返回了本地路径而非公网链接，IMS 将无法访问素材")
+          ElMessage.warning('字幕已生成，但尚未同步至云端，IMS 渲染可能失败')
+          subtitleUrl.value = cloudUrl 
         }
       } else {
-        ElMessage.warning('缺少字幕预览链接')
+        ElMessage.warning('未获取到字幕文件路径')
       }
     } else {
       ElMessage.error(`字幕生成失败：${response.message || '未知错误'}`)
     }
   } catch (error) {
-    ElMessage.error(`字幕生成失败：${error.message || '未知错误'}`)
+    console.error("字幕预览异常:", error)
+    ElMessage.error(`字幕生成异常：${error.message || '请求失败'}`)
   }
 }
+
 
 async function handleGenerate() {
   const rawClips = props.timeline?.clips || []
@@ -1718,7 +2064,6 @@ async function handleGenerate() {
 
     const legacyVideoIds = clipsPayload.filter(c => c.type === 'video').map(c => c.materialId)
     
-    // 获取配音ID：优先从 props.timeline 获取，如果为空则从本地状态获取（处理 props 更新延迟）
     let voiceId = props.timeline?.voice?.materialId || null
     if (!voiceId && localVoiceState.value) {
       voiceId = localVoiceState.value.materialId
@@ -1727,17 +2072,17 @@ async function handleGenerate() {
     const bgmId = props.timeline?.bgm?.materialId || null
     const speed = editForm.value.speed || 1.0
     
-    // 字幕路径：如果已生成字幕预览，自动包含（即使未勾选复选框）
-    // 如果用户明确勾选了复选框，则使用复选框状态；否则，如果有字幕预览，自动包含
-    // 修复：只有当 subtitleUrl 有值且不为空字符串时才使用
-    const subtitlePath = subtitleUrl.value && subtitleUrl.value.trim() ? subtitleUrl.value : null
+    // 【核心修改】：本地任务必须使用 subtitleLocalPath (uploads/...)
+    // 不要使用 subtitleUrl.value，因为它包含 http，会导致后端校验失败
+    const subtitlePath = (subtitleLocalPath.value && subtitleLocalPath.value.trim()) 
+                         ? subtitleLocalPath.value 
+                         : null;
+
     if (editForm.value.subtitleEnabled && !subtitlePath) {
       ElMessage.warning('字幕已启用但未生成字幕文件，请先生成字幕预览')
     }
     
-    // BGM音量：前端是0-100的百分比，后端需要0-1的小数
     const bgmVolume = (editForm.value.bgmVolume || 60) / 100.0
-    // 配音音量：默认100%（1.0）
     const voiceVolume = 1.0
 
     const response = await editorApi.editVideoAsync({
@@ -1746,32 +2091,39 @@ async function handleGenerate() {
       voice_id: voiceId,
       bgm_id: bgmId,
       speed,
-      subtitle_path: subtitlePath,
+      subtitle_path: subtitlePath, // 传给本地 FFmpeg 的合规路径
       bgm_volume: bgmVolume,
       voice_volume: voiceVolume,
-      resolution: editForm.value.resolution || 'auto',
-      ratio: editForm.value.ratio || 'auto'
+      filter_type: editForm.value.filter,
+      filter_intensity: editForm.value.filterIntensity,
+      subtitle_params: {
+        subtitlePreset: editForm.value.subtitlePreset,
+        subtitleFontSize: editForm.value.subtitleFontSize,
+        subtitleColor: editForm.value.subtitleColor,
+        subtitleOutlineColor: editForm.value.subtitleOutlineColor,
+        subtitleY: editForm.value.subtitleY,
+        subtitleAnimation: editForm.value.subtitleAnimation
+      }
     })
 
     if (response.code === 200) {
       const taskId = response.data?.task_id
       if (taskId) {
         progress.value = { show: true, value: 10, text: '任务已创建，正在处理…' }
-        // 轮询任务状态
         pollTaskStatus(taskId)
-      } else {
-        throw new Error('未返回 task_id')
       }
     } else {
       throw new Error(response.message || '创建任务失败')
     }
   } catch (error) {
+    // 之前报错 "字幕路径非法" 就在这里捕获
     alert(`生成失败：${error.message}`)
     progress.value = { show: false, value: 0, text: '' }
   } finally {
     generateLoading.value = false
   }
 }
+
 
 async function pollTaskStatus(taskId) {
   const maxAttempts = 300 // 最多轮询 5 分钟
@@ -2127,20 +2479,54 @@ function formatTime(timeStr) {
   }
 }
 
-function previewTask(task) {
+function handleTaskPreview(task) {
   if (task.preview_url) {
-    window.open(task.preview_url, '_blank')
+    // 强制使用当前页面的播放器进行预览，而不是跳转新窗口
+    previewUrl.value = task.preview_url;
+    
+    // 【关键修复】切换到 Edit Tab 才能看到播放器
+    aiTab.value = 'edit';
+
+    // 滚动到播放器位置
+    nextTick(() => {
+      const playerElement = document.querySelector('.preview-video');
+      if (playerElement) {
+        playerElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        playerElement.load(); // 重新加载视频源
+        playerElement.play().catch(() => {}); // 尝试自动播放
+      }
+    });
+  } else {
+    ElMessage.warning('该任务没有预览链接');
   }
 }
 
-function downloadTask(task) {
-  if (task.preview_url) {
-    const link = document.createElement('a')
+function handleTaskDownload(task) {
+  if (task.output_filename) {
+    // 优先使用后端下载接口（带 Content-Disposition）
+    window.location.href = `/api/download/video/${task.output_filename}`
+  } else if (task.preview_url) {
+    // 备用：直接下载 COS 链接
+     const link = document.createElement('a')
     link.href = task.preview_url
-    link.download = task.output_filename || 'video.mp4'
-    link.click()
+    link.download = task.output_filename || `video_${task.id}.mp4`
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  } else {
+     ElMessage.warning('无法获取下载链接');
   }
 }
+
+// 保留原函数名以兼容旧代码调用的可能性，但在模板中我们已经改为调用 handleTaskPreview/Download
+function previewTask(task) {
+   handleTaskPreview(task);
+}
+
+function downloadTask(task) {
+   handleTaskDownload(task);
+}
+
 
 async function deleteTask(task) {
   if (!confirm(`确定要删除任务 #${task.id} 吗？`)) {
@@ -2667,6 +3053,61 @@ onBeforeUnmount(() => {
   border-color: rgba(22, 119, 255, 0.35);
   color: #1677ff;
   font-weight: 800;
+}
+
+/* 滤镜选择器样式 */
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.filter-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.filter-preview-box {
+  width: 100%;
+  aspect-ratio: 16/9;
+  background-color: #f0f2f5; /* 默认灰色背景 */
+  border-radius: 6px;
+  border: 2px solid transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  color: #555;
+  margin-bottom: 6px;
+  transition: all 0.2s;
+  overflow: hidden;
+  /* 给预览图一个渐变背景，方便看滤镜效果 */
+  background-image: linear-gradient(135deg, #e0e0e0 0%, #ffffff 100%);
+}
+
+/* 选中状态 */
+.filter-item.active .filter-preview-box {
+  border-color: #1677ff;
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.2);
+}
+
+.filter-item.active .filter-name {
+  color: #1677ff;
+  font-weight: 600;
+}
+
+.filter-name {
+  font-size: 12px;
+  color: #666;
+}
+
+/* 视频预览增加过渡，让滤镜切换丝滑 */
+.preview-video {
+  transition: filter 0.3s ease; 
 }
 
 /* 剪辑生成优化样式 */
@@ -4058,5 +4499,39 @@ onBeforeUnmount(() => {
   padding-top: 16px;
   border-top: 1px solid #f0f0f0;
 }
+
+/* 字幕配置区域 - 档位按钮样式 */
+.radio-group {
+  display: flex;
+  background: #f0f2f5;
+  border-radius: 4px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.radio-item {
+  flex: 1;
+  text-align: center;
+  font-size: 12px;
+  padding: 6px 0;
+  cursor: pointer;
+  border-radius: 4px;
+  color: #606266;
+  transition: all 0.2s;
+  user-select: none;
+}
+
+.radio-item:hover {
+  background: rgba(255, 255, 255, 0.6);
+  color: #409eff;
+}
+
+.radio-item.active {
+  background: #ffffff;
+  color: #409eff;
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
 </style>
+
 

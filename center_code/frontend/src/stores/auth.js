@@ -69,19 +69,21 @@ export const useAuthStore = defineStore('auth', () => {
   const login = async (payload) => {
     try {
       const res = await api.auth.login(payload)
-      const tokenValue = res?.data?.token
-      if (tokenValue) {
-        setToken(tokenValue)
-        username.value = res.data.username || payload.username || payload.email || ''
-        email.value = res.data.email || payload.email || ''
-        avatarUrl.value = res.data.avatar_url || ''
-        role.value = res.data.role || ''
-        parentId.value = res.data.parent_id != null ? res.data.parent_id : null
+      const data = res?.data
+      const tokenValue = (data && data.token) || res?.token
+      if (tokenValue && (res?.code === 200 || res?.code === 201)) {
+        setToken(String(tokenValue))
+        username.value = (data && data.username) ?? payload?.username ?? payload?.email ?? ''
+        email.value = (data && data.email) ?? payload?.email ?? ''
+        avatarUrl.value = (data && data.avatar_url) ?? ''
+        role.value = (data && data.role) ?? ''
+        parentId.value = data && data.parent_id != null ? data.parent_id : null
         return { success: true }
       }
-      return { success: false, message: res?.message || 'Login failed' }
+      return { success: false, message: res?.message || '登录失败' }
     } catch (error) {
-      return { success: false, message: error.message || 'Login failed' }
+      const msg = error?.message || error?.data?.message || '登录失败'
+      return { success: false, message: msg }
     }
   }
 
@@ -125,6 +127,7 @@ export const useAuthStore = defineStore('auth', () => {
     role,
     parentId,
     isCheckingLogin,
+    setToken,
     canManageUsers,
     checkLogin,
     login,

@@ -1637,31 +1637,84 @@ def list_outputs():
                     VideoLibrary.platform == 'output'
                 ).order_by(VideoLibrary.created_at.desc()).limit(500).all()
                 
-                # 构建映射关系 (在 Session 存活期间操作对象)
+                # 在 session 内读取所需属性并构建映射（避免 session 关闭后 DetachedInstanceError）
+                from api.video_library import _extract_cos_key_from_url
                 db_video_map = {}
                 for video in user_videos:
                     if video.video_url:
-                        from api.video_library import _extract_cos_key_from_url
                         cos_key = _extract_cos_key_from_url(video.video_url)
-                        if cos_key: db_video_map[cos_key] = video
-                        else: db_video_map[os.path.basename(video.video_url)] = video
-
+                        key = cos_key if cos_key else os.path.basename(video.video_url)
+                        db_video_map[key] = {
+                            "id": video.id,
+                            "video_name": video.video_name,
+                            "video_size": video.video_size,
+                            "created_at": video.created_at,
+                            "description": video.description,
+                            "thumbnail_url": video.thumbnail_url,
+                        }
+                
                 items = []
                 for obj in cos_result['objects']:
-                    cos_key, filename = obj['key'], obj['filename']
-                    db_video = db_video_map.get(cos_key) or db_video_map.get(filename)
-                    
-                    if db_video:
-                        items.append({
-                            "id": db_video.id,
-                            "filename": filename,
-                            "video_name": db_video.video_name,
-                            "size": db_video.video_size or obj['size'],
-                            "update_time": db_video.created_at.strftime("%Y-%m-%d %H:%M:%S") if db_video.created_at else "",
-                            "preview_url": obj['url'],
-                            "video_url": obj['url']
-                        })
-            return response_success(items, "获取成品列表成功")
+                    try:
+                        cos_key = obj['key']
+                        filename = obj['filename']
+                        db_video = db_video_map.get(cos_key) or db_video_map.get(filename)
+                        if db_video:
+                            video_name = db_video.get("video_name") or filename.replace('.mp4', '').replace('output_', 'AI剪辑_')
+                            video_size = db_video.get("video_size") or obj['size']
+                            update_time_str = ""
+                            created_at = db_video.get("created_at")
+                            if created_at:
+                                update_time_str = created_at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(created_at, datetime.datetime) else str(created_at)
+                            task_id = None
+                            description = db_video.get("description")
+                            if description:
+                                import re
+                                match = re.search(r'任务ID:\s*(\d+)', description)
+                                if match:
+                                    task_id = int(match.group(1))
+                            thumbnail_url = None
+                            thumb = db_video.get("thumbnail_url")
+                            if thumb:
+                                from api.video_library import _refresh_cos_url_if_needed
+                                thumbnail_url = _refresh_cos_url_if_needed(thumb)
+                            items.append({
+                                "id": db_video["id"],
+                                "filename": filename,
+                                "video_name": video_name,
+                                "size": video_size,
+                                "update_time": update_time_str,
+                                "preview_url": obj['url'],
+                                "video_url": obj['url'],
+                                "download_url": obj['url'],
+                                "thumbnail_url": thumbnail_url,
+                                "task_id": task_id,
+                                "cos_key": cos_key
+                            })
+                        else:
+                            video_name = filename.replace('.mp4', '').replace('output_', 'AI剪辑_')
+                            items.append({
+                                "id": len(items) + 10000,
+                                "filename": filename,
+                                "video_name": video_name,
+                                "size": obj['size'],
+                                "update_time": obj.get('last_modified') or "",
+                                "preview_url": obj['url'],
+                                "video_url": obj['url'],
+                                "download_url": obj['url'],
+                                "thumbnail_url": None,
+                                "task_id": None,
+                                "cos_key": cos_key
+                            })
+                    except Exception as e:
+                        logger.warning(f"处理COS对象 {obj.get('key', 'unknown')} 时出错：{e}")
+                        continue
+                try:
+                    items.sort(key=lambda x: x.get("update_time") or "", reverse=True)
+                except Exception as sort_error:
+                    logger.warning(f"排序时出错：{sort_error}")
+                logger.info(f"用户 {user_id} 从COS获取到 {len(items)} 个成品视频")
+                return response_success(items, "获取成品列表成功")
         else:
             return _list_outputs_from_db(user_id)
     except Exception as e:

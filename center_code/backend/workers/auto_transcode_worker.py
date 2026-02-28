@@ -113,12 +113,15 @@ def _has_pending_work() -> bool:
 
 def maybe_start_transcode_worker() -> bool:
     """
-    Auto-start transcode worker when enabled and there is pending/processing work.
+    随应用启动时可选地拉起转码 Worker 待命。
+    - TRANSCODE_START_WITH_APP=true：只要打开网页（后端启动）就启动转码进程待命；
+    - AUTO_START_TRANSCODE_WORKER=true：或存在待处理任务时也会自动拉起。
     """
+    start_with_app = _truthy(os.getenv("TRANSCODE_START_WITH_APP", ""))
     enabled = _truthy(os.getenv("AUTO_START_TRANSCODE_WORKER", ""))
-    if not enabled and _is_production():
+    if not start_with_app and not enabled and _is_production():
         return False
-    if not enabled and not _has_pending_work():
+    if not start_with_app and not enabled and not _has_pending_work():
         return False
 
     base_dir = _backend_dir

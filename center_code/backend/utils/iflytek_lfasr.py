@@ -83,7 +83,12 @@ def _raise_if_error(payload: Dict, context: str) -> None:
         raise RuntimeError(f"{context}: empty response")
     if isinstance(payload, dict):
         if "err_no" in payload and str(payload.get("err_no")) not in ("0", ""):
-            raise RuntimeError(f"{context}: err_no={payload.get('err_no')} err_msg={payload.get('err_msg')}")
+            err_no = payload.get("err_no")
+            err_msg = payload.get("err_msg") or payload.get("failed") or payload.get("desc")
+            hint = ""
+            if err_no == 26601:
+                hint = "（26601 通常表示应用未开通「录音文件转写」或鉴权失败，请检查 IFLYTEK_APPID、IFLYTEK_SECRET_KEY 及讯飞开放平台控制台是否已开通对应服务）"
+            raise RuntimeError(f"{context}: err_no={err_no} err_msg={err_msg}{hint}")
         if "ok" in payload and str(payload.get("ok")) not in ("0", ""):
             raise RuntimeError(f"{context}: ok={payload.get('ok')} desc={payload.get('desc')}")
         if "code" in payload and str(payload.get("code")) not in ("0", "000000"):
@@ -554,36 +559,38 @@ def transcribe_with_timestamps(
     if slice_num <= 0:
         raise RuntimeError("音频文件为空，无法转写")
 
-    # 1) create (try candidate bases; different products/accounts may use different base paths)
+    # 1) 创建任务：讯飞公开文档为 /prepare（预处理），部分环境为 /create；先试 create，404 则试 prepare
     create_payload = None
     base = None
     last_err: Optional[Exception] = None
+    create_data = {
+        "appid": appid,
+        "signa": signa,
+        "ts": ts,
+        "file_len": str(file_size),
+        "file_name": file_name,
+        "slice_num": str(slice_num),
+    }
     for b in base_candidates:
-        try:
-            create_payload = _post_form(
-                f"{b}/create",
-                data={
-                    "appid": appid,
-                    "signa": signa,
-                    "ts": ts,
-                    "file_len": str(file_size),
-                    "file_name": file_name,
-                    "slice_num": str(slice_num),
-                },
-                timeout=30,
-            )
-            base = b
+        for path in ("/create", "/prepare"):
+            try:
+                data = dict(create_data)
+                if path == "/prepare":
+                    data["app_id"] = appid  # 部分文档要求 prepare 使用 app_id
+                create_payload = _post_form(f"{b}{path}", data=data, timeout=30)
+                base = b
+                break
+            except requests.HTTPError as e:
+                last_err = e
+                resp = getattr(e, "response", None)
+                if resp is not None and getattr(resp, "status_code", None) == 404:
+                    continue
+                raise
+            except Exception as e:
+                last_err = e
+                raise
+        if create_payload is not None and base is not None:
             break
-        except requests.HTTPError as e:
-            last_err = e
-            resp = getattr(e, "response", None)
-            # 404 likely means wrong base path; try next candidate.
-            if resp is not None and getattr(resp, "status_code", None) == 404:
-                continue
-            raise
-        except Exception as e:
-            last_err = e
-            raise
 
     if create_payload is None or base is None:
         raise RuntimeError(

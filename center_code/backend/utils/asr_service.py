@@ -16,13 +16,28 @@ import os
 from typing import Optional, Tuple, List, Dict
 
 
+def _get_asr_provider(override: Optional[str] = None) -> str:
+    """优先使用传入值，否则从 config 或环境变量读取，保证与 .env 一致。"""
+    if override and str(override).strip():
+        return str(override).strip().lower()
+    try:
+        from config import ASR_PROVIDER
+        if ASR_PROVIDER and str(ASR_PROVIDER).strip():
+            return str(ASR_PROVIDER).strip().lower()
+    except Exception:
+        pass
+    return (os.environ.get("ASR_PROVIDER") or "baidu").strip().lower()
+
+
 def recognize_text_and_timestamps(
     audio_file_path: str,
     *,
     provider: Optional[str] = None,
     timeout_sec: int = 15 * 60,
 ) -> Tuple[str, Optional[List[Dict]]]:
-    provider = (provider or os.environ.get("ASR_PROVIDER") or "baidu").strip().lower()
+    provider = _get_asr_provider(provider)
+    import logging
+    logging.getLogger(__name__).info(f"ASR 使用提供方: {provider}")
 
     if provider in ("iflytek", "iflytek_lfasr", "xfyun", "xunfei", "讯飞"):
         from utils.iflytek_lfasr import transcribe_with_timestamps

@@ -121,6 +121,8 @@ BAIDU_CUID = os.environ.get("BAIDU_CUID", "")
 # =========================
 # baidu (default) | iflytek_lfasr
 ASR_PROVIDER = os.environ.get("ASR_PROVIDER", "baidu")
+if ASR_PROVIDER:
+    print(f"ℹ️  ASR 提供方: {ASR_PROVIDER}（字幕「从配音识别文字」使用）")
 
 # iFlytek (讯飞) 录音文件转写（可选，用于返回更精确的时间戳）
 IFLYTEK_APPID = os.environ.get("IFLYTEK_APPID", "")

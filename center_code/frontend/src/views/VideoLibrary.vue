@@ -846,7 +846,29 @@ function bindMaterialCard(card, m) {
             }
           }
         } catch (error) {
-          showToast(`删除异常：${error.message}`, 'error')
+          // 后端返回 409 时 axios 会 reject，需在这里处理“强制删除”确认
+          if (error && (error.code === 409 || error?.code === 409)) {
+            try {
+              await ElMessageBox.confirm(
+                `${error.message || '该素材被任务引用，确定强制删除吗？'}\n强制删除会导致历史任务引用变为无效。`,
+                '提示',
+                { type: 'warning' }
+              )
+              const response = await materialApi.deleteMaterial(m.id, m.path, true)
+              if (response.code === 200) {
+                showToast('已强制删除')
+                await bootstrapData()
+              } else {
+                showToast(`删除失败：${response.message || '未知错误'}`, 'error')
+              }
+            } catch (innerErr) {
+              if (innerErr !== 'cancel') {
+                showToast(`删除异常：${innerErr?.message || innerErr}`, 'error')
+              }
+            }
+          } else {
+            showToast(`删除异常：${error?.message || error}`, 'error')
+          }
         }
       } catch (error) {
         // 用户取消

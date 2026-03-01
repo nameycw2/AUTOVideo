@@ -38,13 +38,17 @@ export const useAuthStore = defineStore('auth', () => {
     isCheckingLogin.value = true
     try {
       const res = await api.auth.checkLogin()
-      if (res && res.code === 200 && res.data && res.data.logged_in) {
+      // 兼容响应被包一层的情况（如代理返回 { data: { code, message, data } }）
+      const body = (res && res.data && typeof res.data === 'object' && (res.data.code !== undefined || (res.data.data && res.data.data.logged_in !== undefined)))
+        ? res.data
+        : res
+      if (body && body.code === 200 && body.data && body.data.logged_in) {
         isLoggedIn.value = true
-        username.value = res.data.username || ''
-        email.value = res.data.email || ''
-        avatarUrl.value = res.data.avatar_url || ''
-        role.value = res.data.role || ''
-        parentId.value = res.data.parent_id != null ? res.data.parent_id : null
+        username.value = body.data.username || ''
+        email.value = body.data.email || ''
+        avatarUrl.value = body.data.avatar_url || ''
+        role.value = body.data.role || ''
+        parentId.value = body.data.parent_id != null ? body.data.parent_id : null
         return true
       }
 

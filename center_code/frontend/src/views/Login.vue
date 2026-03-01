@@ -129,21 +129,27 @@ const handleLogin = async () => {
       : { mode: 'password', username: form.loginId, password: form.password }
     try {
       const res = await api.auth.login(payload)
-      const token = (res && res.data && res.data.token) || (res && res.token)
-      if (token && (res.code === 200 || res.code === 201)) {
+      // 兼容响应被包一层的情况（如代理返回 { data: { code, message, data, token } }）
+      const body = (res && res.data && typeof res.data === 'object' && (res.data.code !== undefined || res.data.token !== undefined))
+        ? res.data
+        : res
+      const code = body && body.code
+      const message = (body && body.message) || ''
+      const token = (body && body.data && body.data.token) || (body && body.token)
+      if (token && (code === 200 || code === 201)) {
         authStore.setToken(String(token))
-        authStore.username = (res.data && res.data.username) ?? payload.username ?? payload.email ?? ''
-        authStore.email = (res.data && res.data.email) ?? payload.email ?? ''
-        authStore.avatarUrl = (res.data && res.data.avatar_url) ?? ''
-        authStore.role = (res.data && res.data.role) ?? ''
-        authStore.parentId = (res.data && res.data.parent_id) != null ? res.data.parent_id : null
+        authStore.username = (body.data && body.data.username) ?? payload.username ?? payload.email ?? ''
+        authStore.email = (body.data && body.data.email) ?? payload.email ?? ''
+        authStore.avatarUrl = (body.data && body.data.avatar_url) ?? ''
+        authStore.role = (body.data && body.data.role) ?? ''
+        authStore.parentId = (body.data && body.data.parent_id) != null ? body.data.parent_id : null
         router.replace('/')
         return
       }
-      if (res && (res.code === 200 || res.code === 201) && /login\s*success|登录成功/i.test(res?.message || '')) {
-        ElMessage.success(res.message || '登录成功')
+      if (body && (code === 200 || code === 201) && /login\s*success|登录成功/i.test(message)) {
+        ElMessage.success(message || '登录成功')
       } else {
-        ElMessage.error(res?.message || '登录失败')
+        ElMessage.error(message || '登录失败')
       }
     } catch (err) {
       const msg = err?.message || err?.data?.message || '登录失败'

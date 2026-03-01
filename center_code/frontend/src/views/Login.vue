@@ -140,7 +140,11 @@ const handleLogin = async () => {
         router.replace('/')
         return
       }
-      ElMessage.error(res?.message || '登录失败')
+      if (res && (res.code === 200 || res.code === 201) && /login\s*success|登录成功/i.test(res?.message || '')) {
+        ElMessage.success(res.message || '登录成功')
+      } else {
+        ElMessage.error(res?.message || '登录失败')
+      }
     } catch (err) {
       const msg = err?.message || err?.data?.message || '登录失败'
       ElMessage.error(msg)

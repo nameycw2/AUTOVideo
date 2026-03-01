@@ -500,99 +500,123 @@ def ai_subtitle_srt():
             
             logger.info(f"音频文件验证成功: {abs_audio}")
 
+        # 方案 C：若请求中带了时间戳（前端修改错别字后重生成），则仅用时间戳生成字幕，不需文案与 ASR
+        request_timestamps = data.get("timestamps")
+        use_request_timestamps = (
+            isinstance(request_timestamps, list)
+            and len(request_timestamps) > 0
+            and all(
+                isinstance(t, dict) and "start" in t and "end" in t
+                for t in request_timestamps
+            )
+        )
+        if use_request_timestamps:
+            try:
+                duration = max(float(t.get("end", 0)) for t in request_timestamps)
+            except (TypeError, ValueError):
+                duration = 0.0
+            if duration <= 0:
+                return response_error("请求中的 timestamps 无效（end 需为正数）", 400)
+            logger.info(f"使用请求中的时间戳生成字幕: {len(request_timestamps)} 条, duration={duration}s")
+            text = ""  # 后续只用 timestamps，不依赖 text
+            recognized_text = None
+            recognized_timestamps = None
+
         # 如果文案为空且启用了自动识别，从音频中识别文字
-        recognized_text = None
-        recognized_timestamps = None
-        if not text and auto_recognize:
-            try:
-                logger.info("开始从音频识别文字...")
-                # 支持可切换的 ASR 提供方（默认 baidu；可选 iflytek_lfasr 返回时间戳）
-                text, recognized_timestamps = recognize_text_and_timestamps(abs_audio)
-                recognized_text = text
-                logger.info(f"语音识别成功，识别出 {len(text)} 个字符: {text[:100]}...")
-                
-                if not text:
-                    return response_error("语音识别结果为空，请手动输入文案", 400)
-            except Exception as asr_error:
-                logger.exception(f"语音识别失败: {asr_error}")
-                return response_error(f"从音频识别文字失败：{str(asr_error)}，请手动输入文案", 500)
-        
-        # 如果仍然没有文案，返回错误
-        if not text:
-            logger.error("文案为空且未启用自动识别")
-            return response_error("text 不能为空，或者启用 auto_recognize 参数从音频自动识别", 400)
-
-        # 获取音频时长（需要 ffmpeg-python）
-        try:
-            import ffmpeg
-            import shutil
+        if not use_request_timestamps:
+            recognized_text = None
+            recognized_timestamps = None
+            if not text and auto_recognize:
+                try:
+                    logger.info("开始从音频识别文字...")
+                    # 支持可切换的 ASR 提供方（默认 baidu；可选 iflytek_lfasr 返回时间戳）
+                    text, recognized_timestamps = recognize_text_and_timestamps(abs_audio)
+                    recognized_text = text
+                    logger.info(f"语音识别成功，识别出 {len(text)} 个字符: {text[:100]}...")
+                    
+                    if not text:
+                        return response_error("语音识别结果为空，请手动输入文案", 400)
+                except Exception as asr_error:
+                    logger.exception(f"语音识别失败: {asr_error}")
+                    return response_error(f"从音频识别文字失败：{str(asr_error)}，请手动输入文案", 500)
             
-            # 检查并配置 FFmpeg 路径
+            # 如果仍然没有文案，返回错误
+            if not text:
+                logger.error("文案为空且未启用自动识别")
+                return response_error("text 不能为空，或者启用 auto_recognize 参数从音频自动识别", 400)
+
+        # 获取音频时长（仅在不使用请求时间戳时需要）
+        if not use_request_timestamps:
             try:
-                from config import FFMPEG_PATH as config_ffmpeg_path
-                ffmpeg_path = os.environ.get('FFMPEG_PATH') or config_ffmpeg_path
+                import ffmpeg
+                import shutil
+                
+                # 检查并配置 FFmpeg 路径
+                try:
+                    from config import FFMPEG_PATH as config_ffmpeg_path
+                    ffmpeg_path = os.environ.get('FFMPEG_PATH') or config_ffmpeg_path
+                except ImportError:
+                    ffmpeg_path = os.environ.get('FFMPEG_PATH')
+                
+                if ffmpeg_path and os.path.exists(ffmpeg_path):
+                    # 设置 ffmpeg-python 使用指定的路径
+                    ffmpeg_path = os.path.abspath(ffmpeg_path)
+                    ffmpeg_dir = os.path.dirname(ffmpeg_path)
+                    if ffmpeg_dir not in os.environ.get('PATH', ''):
+                        os.environ['PATH'] = ffmpeg_dir + os.pathsep + os.environ.get('PATH', '')
+                    logger.info(f"使用配置的 FFmpeg 路径：{ffmpeg_path}")
+                else:
+                    # 尝试从系统 PATH 中查找
+                    ffmpeg_path = shutil.which('ffmpeg')
+                    if not ffmpeg_path:
+                        # 尝试常见路径
+                        common_paths = [
+                            r'D:\ffmpeg\bin\ffmpeg.exe',
+                            r'C:\ffmpeg\bin\ffmpeg.exe',
+                            r'C:\Program Files\ffmpeg\bin\ffmpeg.exe',
+                            r'C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe',
+                        ]
+                        for path in common_paths:
+                            if os.path.exists(path):
+                                ffmpeg_path = path
+                                ffmpeg_dir = os.path.dirname(ffmpeg_path)
+                                if ffmpeg_dir not in os.environ.get('PATH', ''):
+                                    os.environ['PATH'] = ffmpeg_dir + os.pathsep + os.environ.get('PATH', '')
+                                logger.info(f"找到 FFmpeg：{ffmpeg_path}")
+                                break
+                    
+                    if not ffmpeg_path or not os.path.exists(ffmpeg_path):
+                        error_msg = (
+                            "未找到 FFmpeg 可执行文件，无法获取音频时长。\n"
+                            "解决方案：\n"
+                            "1. 将 FFmpeg 的 bin 目录添加到系统 PATH 环境变量\n"
+                            "2. 或设置环境变量 FFMPEG_PATH 指向 ffmpeg.exe 的完整路径\n"
+                            "   例如：set FFMPEG_PATH=D:\\软件\\ffmpeg\\bin\\ffmpeg.exe\n"
+                            "3. 或在 config.py 中设置 FFMPEG_PATH\n"
+                            "4. 重启后端服务后重试"
+                        )
+                        logger.error(error_msg)
+                        return response_error(error_msg, 500)
+                
+                logger.info(f"开始获取音频时长: {abs_audio}")
+                probe = ffmpeg.probe(abs_audio)
+                fmt = probe.get("format") or {}
+                duration = float(fmt.get("duration") or 0.0)
+                logger.info(f"音频时长获取成功: {duration} 秒")
             except ImportError:
-                ffmpeg_path = os.environ.get('FFMPEG_PATH')
-            
-            if ffmpeg_path and os.path.exists(ffmpeg_path):
-                # 设置 ffmpeg-python 使用指定的路径
-                ffmpeg_path = os.path.abspath(ffmpeg_path)
-                ffmpeg_dir = os.path.dirname(ffmpeg_path)
-                if ffmpeg_dir not in os.environ.get('PATH', ''):
-                    os.environ['PATH'] = ffmpeg_dir + os.pathsep + os.environ.get('PATH', '')
-                logger.info(f"使用配置的 FFmpeg 路径：{ffmpeg_path}")
-            else:
-                # 尝试从系统 PATH 中查找
-                ffmpeg_path = shutil.which('ffmpeg')
-                if not ffmpeg_path:
-                    # 尝试常见路径
-                    common_paths = [
-                        r'D:\ffmpeg\bin\ffmpeg.exe',
-                        r'C:\ffmpeg\bin\ffmpeg.exe',
-                        r'C:\Program Files\ffmpeg\bin\ffmpeg.exe',
-                        r'C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe',
-                    ]
-                    for path in common_paths:
-                        if os.path.exists(path):
-                            ffmpeg_path = path
-                            ffmpeg_dir = os.path.dirname(ffmpeg_path)
-                            if ffmpeg_dir not in os.environ.get('PATH', ''):
-                                os.environ['PATH'] = ffmpeg_dir + os.pathsep + os.environ.get('PATH', '')
-                            logger.info(f"找到 FFmpeg：{ffmpeg_path}")
-                            break
-                
-                if not ffmpeg_path or not os.path.exists(ffmpeg_path):
-                    error_msg = (
-                        "未找到 FFmpeg 可执行文件，无法获取音频时长。\n"
-                        "解决方案：\n"
-                        "1. 将 FFmpeg 的 bin 目录添加到系统 PATH 环境变量\n"
-                        "2. 或设置环境变量 FFMPEG_PATH 指向 ffmpeg.exe 的完整路径\n"
-                        "   例如：set FFMPEG_PATH=D:\\软件\\ffmpeg\\bin\\ffmpeg.exe\n"
-                        "3. 或在 config.py 中设置 FFMPEG_PATH\n"
-                        "4. 重启后端服务后重试"
-                    )
-                    logger.error(error_msg)
-                    return response_error(error_msg, 500)
-            
-            logger.info(f"开始获取音频时长: {abs_audio}")
-            probe = ffmpeg.probe(abs_audio)
-            fmt = probe.get("format") or {}
-            duration = float(fmt.get("duration") or 0.0)
-            logger.info(f"音频时长获取成功: {duration} 秒")
-        except ImportError:
-            logger.error("缺少 ffmpeg-python 库")
-            return response_error("缺少 ffmpeg-python，无法获取音频时长", 500)
-        except Exception as e:
-            logger.exception(f"获取音频时长失败: {e}")
-            error_msg = f"获取音频时长失败：{str(e)}"
-            # 如果是 FileNotFoundError，提供更详细的错误信息
-            if isinstance(e, FileNotFoundError) or "找不到指定的文件" in str(e):
-                error_msg += "\n\n请确保 FFmpeg 已正确安装并配置。"
-            return response_error(error_msg, 500)
+                logger.error("缺少 ffmpeg-python 库")
+                return response_error("缺少 ffmpeg-python，无法获取音频时长", 500)
+            except Exception as e:
+                logger.exception(f"获取音频时长失败: {e}")
+                error_msg = f"获取音频时长失败：{str(e)}"
+                # 如果是 FileNotFoundError，提供更详细的错误信息
+                if isinstance(e, FileNotFoundError) or "找不到指定的文件" in str(e):
+                    error_msg += "\n\n请确保 FFmpeg 已正确安装并配置。"
+                return response_error(error_msg, 500)
 
-        if duration <= 0:
-            logger.error(f"音频时长无效: {duration}")
-            return response_error("音频时长无效，无法生成字幕", 500)
+            if duration <= 0:
+                logger.error(f"音频时长无效: {duration}")
+                return response_error("音频时长无效，无法生成字幕", 500)
 
         # 生成字幕
         try:

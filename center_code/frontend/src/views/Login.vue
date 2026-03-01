@@ -127,13 +127,25 @@ const handleLogin = async () => {
     const payload = form.mode === 'code'
       ? { mode: 'code', email: form.email, code: form.code }
       : { mode: 'password', username: form.loginId, password: form.password }
-    const result = await authStore.login(payload)
-    loading.value = false
-    if (result.success) {
-      await authStore.checkLogin()
-      router.replace('/')
-    } else {
-      ElMessage.error(result.message || '登录失败')
+    try {
+      const res = await api.auth.login(payload)
+      const token = (res && res.data && res.data.token) || (res && res.token)
+      if (token && (res.code === 200 || res.code === 201)) {
+        authStore.setToken(String(token))
+        authStore.username = (res.data && res.data.username) ?? payload.username ?? payload.email ?? ''
+        authStore.email = (res.data && res.data.email) ?? payload.email ?? ''
+        authStore.avatarUrl = (res.data && res.data.avatar_url) ?? ''
+        authStore.role = (res.data && res.data.role) ?? ''
+        authStore.parentId = (res.data && res.data.parent_id) != null ? res.data.parent_id : null
+        router.replace('/')
+        return
+      }
+      ElMessage.error(res?.message || '登录失败')
+    } catch (err) {
+      const msg = err?.message || err?.data?.message || '登录失败'
+      ElMessage.error(msg)
+    } finally {
+      loading.value = false
     }
   })
 }

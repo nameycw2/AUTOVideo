@@ -7,6 +7,7 @@ import os
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+from sqlalchemy import text
 from db import get_db
 
 def migrate_add_filter_fields():
@@ -14,13 +15,13 @@ def migrate_add_filter_fields():
     try:
         with get_db() as db:
             # 检查字段是否已存在
-            check_sql = """
+            check_sql = text("""
                 SELECT COLUMN_NAME 
                 FROM INFORMATION_SCHEMA.COLUMNS 
                 WHERE TABLE_SCHEMA = DATABASE() 
                 AND TABLE_NAME = 'video_edit_tasks' 
                 AND COLUMN_NAME IN ('filter_type', 'filter_intensity')
-            """
+            """)
             result = db.execute(check_sql).fetchall()
             existing_columns = [row[0] for row in result]
             
@@ -31,22 +32,22 @@ def migrate_add_filter_fields():
             # 添加 filter_type 字段
             if 'filter_type' not in existing_columns:
                 print("正在添加 filter_type 字段...")
-                alter_sql_1 = """
+                alter_sql_1 = text("""
                     ALTER TABLE video_edit_tasks 
                     ADD COLUMN filter_type VARCHAR(50) NULL COMMENT '滤镜类型（vintage/noir/cyberpunk等）' 
                     AFTER subtitle_path
-                """
+                """)
                 db.execute(alter_sql_1)
                 print("✓ filter_type 字段添加成功")
             
             # 添加 filter_intensity 字段
             if 'filter_intensity' not in existing_columns:
                 print("正在添加 filter_intensity 字段...")
-                alter_sql_2 = """
+                alter_sql_2 = text("""
                     ALTER TABLE video_edit_tasks 
                     ADD COLUMN filter_intensity FLOAT DEFAULT 1.0 COMMENT '滤镜强度（0.0-1.0）' 
                     AFTER filter_type
-                """
+                """)
                 db.execute(alter_sql_2)
                 print("✓ filter_intensity 字段添加成功")
             

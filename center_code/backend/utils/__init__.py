@@ -63,7 +63,7 @@ except Exception as e:
     def get_current_user_role():
         return None
 
-    def create_access_token(user_id, username, email):
+    def create_access_token(user_id, username, email, role=None, parent_id=None):
         return ''
 
     def decode_access_token(token):

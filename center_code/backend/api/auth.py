@@ -232,14 +232,22 @@ def login():
         parent_id = getattr(user, 'parent_id', None)
         token = create_access_token(user_id, username, email_value, role=role, parent_id=parent_id)
 
-    return response_success({
-        'token': token,
-        'username': username,
-        'email': email_value,
-        'avatar_url': avatar_url,
-        'role': role,
-        'parent_id': parent_id
-    }, 'Login success', 200)
+    # 同时把 token 放在顶层，方便前端在 data 被代理改写时仍能取到
+    from flask import jsonify
+    body = {
+        'code': 200,
+        'message': 'Login success',
+        'data': {
+            'token': token,
+            'username': username,
+            'email': email_value,
+            'avatar_url': avatar_url,
+            'role': role,
+            'parent_id': parent_id
+        },
+        'token': token
+    }
+    return jsonify(body), 200
 
 
 @auth_bp.route('/logout', methods=['POST'])

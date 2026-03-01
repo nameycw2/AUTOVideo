@@ -2,9 +2,7 @@
   <el-config-provider :locale="locale">
     <div id="app-container">
       <router-view v-if="isInitialized" />
-      <div v-else class="loading-container">
-        <el-loading :loading="true" text="正在初始化..." />
-      </div>
+      <div v-else v-loading="true" element-loading-text="正在初始化..." class="loading-container" />
     </div>
   </el-config-provider>
 </template>

@@ -12,6 +12,7 @@ import shutil
 import uuid
 import math
 from typing import Optional, List, Dict, Any
+from urllib.parse import urlparse
 from flask import Blueprint, request, send_from_directory
 import requests
 
@@ -1071,8 +1072,11 @@ def edit_video_async():
         if filter_type:
             logger.info(f"滤镜参数: filter_type={filter_type}, filter_intensity={filter_intensity}")
         
-        # 获取字幕样式参数
+        # 获取字幕样式参数；简单模式不传样式，使用后端 min_dim 自适应
+        subtitle_scheme = data.get("subtitle_scheme") or "simple"
         subtitle_params = data.get("subtitle_params") or data.get("subtitleParams")
+        if subtitle_scheme == "simple":
+            subtitle_params = None
         if subtitle_params:
             logger.info(f"字幕样式参数: {json.dumps(subtitle_params, ensure_ascii=False)}")
 
@@ -2029,6 +2033,16 @@ def handle_ims_submit():
         voice_url = data.get('voice_url')  
         bgm_url = data.get('bgm_url')      
         params = data.get('subtitle_params')
+        params = dict(params) if params else {}
+        # 字幕渲染方式：effect=字幕特效(ASS)，plain=原有逻辑(仅SRT)
+        subtitle_render_mode = (data.get('subtitle_render_mode') or 'effect').strip().lower()
+        if subtitle_render_mode not in ('effect', 'plain'):
+            subtitle_render_mode = 'effect'
+        # 成片分辨率，供字幕 ASS 适配视频大小（默认竖屏 1080x1920）
+        if params.get('video_width') is None:
+            params['video_width'] = data.get('video_width') or 1080
+        if params.get('video_height') is None:
+            params['video_height'] = data.get('video_height') or 1920
 
         if not video_url:
             logger.error("[IMS DEBUG] video_url 为空，返回 400")
@@ -2063,10 +2077,15 @@ def handle_ims_submit():
         voice_url = media_assets['voice']
         bgm_url = media_assets['bgm']
 
-        # 3. 字幕高级处理 (SRT -> ASS)
+        # 3. 字幕处理：按渲染方式分支
         if subtitle_url:
             srt_content = None
-            pure_sub_name = os.path.basename(subtitle_url).split('?')[0]
+            # 从 URL 或路径取文件名：HTTP URL 用 urlparse 避免 Windows 下 os.path.basename 返回整串
+            if subtitle_url.startswith('http'):
+                parsed = urlparse(subtitle_url)
+                pure_sub_name = os.path.basename(parsed.path or subtitle_url).split('?')[0]
+            else:
+                pure_sub_name = os.path.basename(subtitle_url).split('?')[0]
             actual_name = pure_sub_name.split('_', 1)[-1] if '_' in pure_sub_name else pure_sub_name
             
             # 搜索本地文件
@@ -2091,21 +2110,60 @@ def handle_ims_submit():
                 except Exception as e:
                     logger.error(f"IMS 字幕云端下载失败: {e}")
 
-            # 执行转换并上传 ASS
-            if srt_content:
-                from utils.aliyun_ims import SubtitleEffectBuilder, convert_srt_to_ass_content
-                builder = SubtitleEffectBuilder("", params)
-                ass_content = convert_srt_to_ass_content(srt_content, builder.build_style())
-                
-                ass_filename = pure_sub_name.replace('.srt', '.ass')
-                local_ass_path = os.path.join(SUBTITLE_DIR, ass_filename)
-                
-                with open(local_ass_path, 'w', encoding='utf-8') as f:
-                    f.write(ass_content)
-                
-                up_res = upload_file_to_cos(local_ass_path, f"subtitles/{uuid.uuid4().hex}_{ass_filename}")
-                if up_res.get('success'):
-                    subtitle_url = up_res.get('url')
+            if subtitle_render_mode == 'plain':
+                # 原有逻辑：只传 SRT，不转 ASS。确保字幕为可访问的 HTTP URL。
+                if subtitle_url.startswith('http'):
+                    path_part = urlparse(subtitle_url).path or subtitle_url
+                    if '.srt' in path_part.lower():
+                        pass  # 已是 SRT 的 HTTP 地址，直接使用
+                    elif srt_content:
+                        srt_filename = pure_sub_name if pure_sub_name.lower().endswith('.srt') else (pure_sub_name.replace('.ass', '.srt'))
+                        local_srt_path = os.path.join(SUBTITLE_DIR, srt_filename)
+                        with open(local_srt_path, 'w', encoding='utf-8') as f:
+                            f.write(srt_content)
+                        up_res = upload_file_to_cos(local_srt_path, f"subtitles/{uuid.uuid4().hex}_{srt_filename}")
+                        if up_res.get('success'):
+                            subtitle_url = up_res.get('url')
+                        else:
+                            logger.warning("IMS 字幕(plain)：SRT 上传 COS 失败，本次不烧录字幕")
+                            subtitle_url = None
+                    else:
+                        subtitle_url = None
+                elif srt_content:
+                    # 本地或已下载到内容：上传 SRT 到 COS，用新 URL
+                    srt_filename = pure_sub_name if pure_sub_name.lower().endswith('.srt') else (pure_sub_name.replace('.ass', '.srt'))
+                    local_srt_path = os.path.join(SUBTITLE_DIR, srt_filename)
+                    with open(local_srt_path, 'w', encoding='utf-8') as f:
+                        f.write(srt_content)
+                    up_res = upload_file_to_cos(local_srt_path, f"subtitles/{uuid.uuid4().hex}_{srt_filename}")
+                    if up_res.get('success'):
+                        subtitle_url = up_res.get('url')
+                    else:
+                        logger.warning("IMS 字幕(plain)：SRT 上传 COS 失败，本次不烧录字幕")
+                        subtitle_url = None
+                else:
+                    logger.warning("IMS 字幕(plain)：未找到 SRT 内容或下载失败，本次不烧录字幕")
+                    subtitle_url = None
+            else:
+                # 字幕特效：SRT -> ASS，上传 ASS
+                if srt_content:
+                    from utils.aliyun_ims import SubtitleEffectBuilder, convert_srt_to_ass_content
+                    builder = SubtitleEffectBuilder("", params)
+                    ass_content = convert_srt_to_ass_content(srt_content, builder.build_style())
+                    
+                    ass_filename = pure_sub_name.replace('.srt', '.ass')
+                    local_ass_path = os.path.join(SUBTITLE_DIR, ass_filename)
+                    
+                    with open(local_ass_path, 'w', encoding='utf-8') as f:
+                        f.write(ass_content)
+                    
+                    up_res = upload_file_to_cos(local_ass_path, f"subtitles/{uuid.uuid4().hex}_{ass_filename}")
+                    if up_res.get('success'):
+                        subtitle_url = up_res.get('url')
+                else:
+                    # 无法获取 SRT 内容时不要用原 SRT URL 当 ASS 提交，避免 IMS 报错或渲染异常
+                    logger.warning("IMS 字幕：未找到 SRT 内容或下载失败，本次不烧录字幕")
+                    subtitle_url = None
 
         # 4. 提交至阿里云 IMS 渲染
         from utils.aliyun_ims import submit_ims_task
@@ -2120,6 +2178,7 @@ def handle_ims_submit():
             subtitle_url=subtitle_url, 
             output_filename=output_filename, 
             subtitle_style=params,
+            subtitle_render_mode=subtitle_render_mode,
             voice_url=voice_url,
             bgm_url=bgm_url
         )

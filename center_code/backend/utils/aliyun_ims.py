@@ -35,7 +35,8 @@ def hex_to_ass_color(hex_str):
 # ============================================================
 def convert_srt_to_ass_content(srt_content, style_params):
     """
-    将读取到的SRT内容转为带Style头的ASS内容，实现样式硬编码
+    将读取到的SRT内容转为带Style头的ASS内容，实现样式硬编码。
+    style_params 可含 PlayResX/PlayResY，用于适配成片分辨率（与视频大小一致）。
     """
     font_name = style_params.get("FontName", "SimSun")
     font_size = style_params.get("FontSize", 60)
@@ -43,12 +44,17 @@ def convert_srt_to_ass_content(srt_content, style_params):
     outline_color = style_params.get("OutlineColour", "&H00000000")
     outline = style_params.get("Outline", 2)
     margin_v = style_params.get("MarginV", 160)
+    # 成片分辨率，与视频一致时字幕比例正确（默认 1080p 横屏）
+    play_res_x = int(style_params.get("PlayResX", 1920))
+    play_res_y = int(style_params.get("PlayResY", 1080))
+    play_res_x = max(320, min(4096, play_res_x))
+    play_res_y = max(320, min(4096, play_res_y))
 
-    # ASS 模板头部：定义设计稿
+    # ASS 模板头部：使用成片分辨率，字幕随视频大小适配
     ass_header = f"""[Script Info]
 ScriptType: v4.00+
-PlayResX: 1920
-PlayResY: 1080
+PlayResX: {play_res_x}
+PlayResY: {play_res_y}
 
 [v4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
@@ -63,15 +69,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     for part in srt_parts:
         lines = part.split('\n')
         if len(lines) >= 3:
-            # 匹配时间轴 00:00:01,000 --> 00:00:03,000
+            # 匹配时间轴 00:00:01,000 --> 00:00:03,000（毫秒可为 1~3 位）
             time_match = re.search(r'(\d+:\d+:\d+),(\d+) --> (\d+:\d+:\d+),(\d+)', lines[1])
             if time_match:
-                # 毫秒转厘秒并构造 ASS 时间戳
-                start = f"{time_match.group(1)}.{time_match.group(2)[:2]}"
-                end = f"{time_match.group(3)}.{time_match.group(4)[:2]}"
-                # 调整为 h:mm:ss.cc 格式
-                if start.startswith("00:"): start = start[1:]
-                if end.startswith("00:"): end = end[1:]
+                def ms_to_centisec(ms_str):
+                    ms_str = (ms_str or "0").strip()[:3].zfill(3)
+                    return min(99, int(ms_str) // 10)
+                cs_s = ms_to_centisec(time_match.group(2))
+                cs_e = ms_to_centisec(time_match.group(4))
+                start = f"{time_match.group(1)}.{cs_s:02d}"
+                end = f"{time_match.group(3)}.{cs_e:02d}"
+                # ASS 格式 H:MM:SS.cc，小时为 0 时可用单数字
+                if start.startswith("00:"):
+                    start = start[1:]
+                if end.startswith("00:"):
+                    end = end[1:]
                 text = "\\N".join(lines[2:])
                 ass_lines.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
 
@@ -106,50 +118,55 @@ class SubtitleEffectBuilder:
 
         style["FontName"] = base.get("FontName", "SimSun")
         
-        # --- [NEW] 字号映射控制 ---
-        size_map = {
-            "small": 48,
-            "medium": 72,
-            "large": 96
-        }
-        # 获取前端传来的字号枚举，默认为 medium
+        # 成片分辨率（与视频一致时字幕随视频大小适配）
+        play_res_x = self._int_param("video_width", 1080, 320, 4096)
+        play_res_y = self._int_param("video_height", 1920, 320, 4096)
+        style["PlayResX"] = play_res_x
+        style["PlayResY"] = play_res_y
+        # 以 1080 为参考，按比例缩放字号与边距（与本地 FFmpeg 思路一致）
+        ref_height = 1080.0
+        scale = min(play_res_x, play_res_y) / ref_height
+        scale = max(0.3, min(3.0, scale))
+        
+        # --- 字号映射并随分辨率缩放 ---
+        size_map = {"small": 48, "medium": 72, "large": 96}
         size_key = self.params.get("subtitleFontSize", "medium")
-        # 如果前端传来了为了兼容旧版的数字，尝试回退到默认
         if str(size_key).isdigit():
             val = int(size_key)
-            style["FontSize"] = 48 if val < 60 else (96 if val > 80 else 72)
+            base_font = 48 if val < 60 else (96 if val > 80 else 72)
         else:
-            style["FontSize"] = size_map.get(size_key, 72)
+            base_font = size_map.get(size_key, 72)
+        style["FontSize"] = max(12, min(150, round(base_font * scale)))
         
         # 颜色转换
         style["PrimaryColour"] = hex_to_ass_color(self.params.get("subtitleColor", base.get("FontColor", "#FFFFFF")))
         style["Outline"] = base.get("Outline", 2)
         style["OutlineColour"] = hex_to_ass_color(self.params.get("subtitleOutlineColor", base.get("OutlineColor", "#000000")))
-        style["Alignment"] = 2  # 始终底部居中对齐
+        style["Alignment"] = 2
 
-        # --- [NEW] 位置映射控制 (MarginV) ---
-        # 1080p 画布高度
-        CANVAS_HEIGHT = 1080
-        # 预设 MarginV 值 (以底部为基准的垂直边距)
-        # Top: 距离底部约 90% 的位置 -> Y=0.1
-        # Middle: 距离底部 50% 的位置 -> Y=0.5
-        # Bottom: 距离底部 15% 的位置 -> Y=0.85
-        pos_map = {
-            "top": int(CANVAS_HEIGHT * 0.85),     # 918px
-            "middle": int(CANVAS_HEIGHT * 0.5),   # 540px
-            "bottom": int(CANVAS_HEIGHT * 0.15)   # 162px (安全位)
-        }
+        # --- MarginV 按成片高度比例缩放（保持相对位置）---
+        pos_map_ref = {"top": 0.85, "middle": 0.5, "bottom": 0.15}
         pos_key = self.params.get("subtitleY", "bottom")
-        
-        # 兼容逻辑：如果传过来的是旧版浮点数字符串
         if str(pos_key).replace('.', '', 1).isdigit():
-             y_val = float(pos_key)
-             style["MarginV"] = int((1 - y_val) * CANVAS_HEIGHT)
+            y_ratio = float(pos_key)
+            margin_v_ref = (1 - y_ratio) * ref_height
         else:
-            style["MarginV"] = pos_map.get(pos_key, 162)
+            margin_v_ref = pos_map_ref.get(pos_key, 0.15) * ref_height
+        style["MarginV"] = max(10, round(margin_v_ref * play_res_y / ref_height))
 
-        print(f"🎨 [FINAL-STYLE] 样式构建完成: {json.dumps(style, ensure_ascii=False)}")
+        logger.info("ASS 样式(随分辨率适配): PlayRes=%dx%d FontSize=%s MarginV=%s",
+                    play_res_x, play_res_y, style["FontSize"], style["MarginV"])
         return style
+
+    def _int_param(self, key, default, lo, hi):
+        try:
+            v = self.params.get(key)
+            if v is None:
+                return default
+            n = int(v)
+            return max(lo, min(hi, n))
+        except (TypeError, ValueError):
+            return default
 
     def build_clip(self):
         style_config = self.build_style()
@@ -183,14 +200,19 @@ def create_ice_client():
     config.endpoint = f"ice.{region}.aliyuncs.com"
     return IceClient(config)
 
-def build_subtitle_track(subtitle_url, style_params):
-    if not subtitle_url: return None
+def build_subtitle_track(subtitle_url, style_params, subtitle_render_mode='effect'):
+    if not subtitle_url:
+        return None
+    if subtitle_render_mode == 'plain':
+        # 原有逻辑：只传 SRT，ICE 支持 SubType="srt"
+        return {"SubtitleTrackClips": [{"Type": "Subtitle", "SubType": "srt", "FileUrl": subtitle_url}]}
     builder = SubtitleEffectBuilder(subtitle_url, style_params)
     return builder.build_track()
 
-def submit_ims_task(video_url, subtitle_url, output_filename, subtitle_style=None, voice_url=None, bgm_url=None):
+def submit_ims_task(video_url, subtitle_url, output_filename, subtitle_style=None, subtitle_render_mode='effect', voice_url=None, bgm_url=None):
     """
-    提交 IMS 剪辑任务 (最终稳健版)
+    提交 IMS 剪辑任务。
+    subtitle_render_mode: 'effect' 使用 ASS 字幕特效，'plain' 使用仅 SRT 外挂字幕。
     """
     print("\n🎬 [ICE-SUBMIT] 开始处理 IMS 提交...")
     client = create_ice_client()
@@ -214,7 +236,7 @@ def submit_ims_task(video_url, subtitle_url, output_filename, subtitle_style=Non
     }
 
     if subtitle_url:
-        sub_track = build_subtitle_track(subtitle_url, subtitle_style)
+        sub_track = build_subtitle_track(subtitle_url, subtitle_style, subtitle_render_mode)
         if sub_track: timeline["SubtitleTracks"].append(sub_track)
 
     print("\n📦 [FINAL-TIMELINE] 发送至阿里的 JSON:")

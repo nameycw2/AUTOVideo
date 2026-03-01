@@ -618,21 +618,78 @@
               <span class="subtitle-preview-title">字幕预览</span>
               <span class="subtitle-status-badge">已生成</span>
             </div>
-            <div v-if="recognizedText" class="subtitle-text-preview">
+            <!-- 方案 C：有时间戳时按句编辑错别字 -->
+            <template v-if="subtitleTimestamps && subtitleTimestamps.length > 0">
+              <div class="subtitle-segment-label">识别内容（可修改错别字后点击下方按钮重新生成字幕，时间轴不变）：</div>
+              <div class="subtitle-segment-list">
+                <div
+                  v-for="(seg, idx) in subtitleTimestamps"
+                  :key="idx"
+                  class="subtitle-segment-item"
+                >
+                  <span class="subtitle-segment-time">{{ formatSubtitleTime(seg.start) }} – {{ formatSubtitleTime(seg.end) }}</span>
+                  <input
+                    v-model="seg.text"
+                    type="text"
+                    class="subtitle-segment-input"
+                    :placeholder="`第 ${idx + 1} 句`"
+                  />
+                </div>
+              </div>
+              <button
+                type="button"
+                class="btn btn-secondary"
+                :disabled="subtitleRegenerating"
+                @click="handleRegenerateSubtitleFromTimestamps"
+                style="margin-top:10px;"
+              >
+                <span v-if="subtitleRegenerating" class="spinner" style="width:14px;height:14px;border-width:2px;margin-right:6px"></span>
+                {{ subtitleRegenerating ? '正在重新生成…' : '用修改后的内容重新生成字幕' }}
+              </button>
+            </template>
+            <div v-else-if="recognizedText" class="subtitle-text-preview">
               <div class="subtitle-text-label">识别内容：</div>
               <div class="subtitle-text-content">{{ recognizedText }}</div>
             </div>
           </div>
 
-          <div v-if="editForm.subtitleEnabled" class="ims-subtitle-effects" style="margin-top:16px; padding:16px; background:#f9f9f9; border-radius:8px; border:1px dashed #dcdfe6;">
+          <!-- 成片方式：简单模式（原有逻辑） vs 字幕渲染（走 IMS） -->
+          <div v-if="editForm.subtitleEnabled" style="margin-top:16px; padding:12px 16px; background:#f0f7ff; border-radius:8px; border:1px solid #c6e2ff;">
+            <div class="field-label" style="font-weight:bold; margin-bottom:10px; color:#303133;">成片方式</div>
+            <div class="radio-group" style="margin-bottom:8px;">
+              <label class="radio-label" :class="{active: editForm.subtitleScheme === 'simple'}" style="padding:8px 12px;">
+                <input type="radio" v-model="editForm.subtitleScheme" value="simple"> 简单模式（原有逻辑）
+              </label>
+              <label class="radio-label" :class="{active: editForm.subtitleScheme === 'ims'}" style="padding:8px 12px;">
+                <input type="radio" v-model="editForm.subtitleScheme" value="ims"> 字幕渲染（走 IMS）
+              </label>
+            </div>
+            <p v-if="editForm.subtitleScheme === 'simple'" style="font-size:12px;color:#606266;margin:0;">使用本地 FFmpeg 烧录字幕，请点击下方「一键生成AI剪辑视频」。</p>
+            <p v-else style="font-size:12px;color:#606266;margin:0;">使用阿里云 IMS 云端渲染字幕，可在下方选择样式并提交任务。</p>
+          </div>
+
+          <!-- 字幕渲染（走 IMS）：仅当选择 IMS 时展示 -->
+          <div v-if="editForm.subtitleEnabled && editForm.subtitleScheme === 'ims'" class="ims-subtitle-effects" style="margin-top:16px; padding:16px; background:#f9f9f9; border-radius:8px; border:1px dashed #dcdfe6;">
             <div class="field-label" style="font-weight:bold; color:#409EFF; margin-bottom:12px; display:flex; align-items:center;">
               <svg style="width:16px;height:16px;margin-right:6px;" viewBox="0 0 24 24" fill="none">
                 <path d="M12 21a9 9 0 1 1 0-18 9 9 0 0 1 0 18zM18 17H6M21 7H3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
               </svg>
-              字幕特效 (IMS)
+              字幕渲染（走 IMS）
             </div>
 
-            <!-- 1. 预设风格 -->
+            <!-- IMS 内渲染方式：字幕特效 vs 仅 SRT -->
+            <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:#606266">样式</div>
+            <div class="radio-group" style="margin-bottom:16px;">
+              <label class="radio-label" :class="{active: editForm.subtitleRenderMode === 'effect'}" style="padding:8px 12px;">
+                <input type="radio" v-model="editForm.subtitleRenderMode" value="effect"> 字幕特效（ASS，可调样式）
+              </label>
+              <label class="radio-label" :class="{active: editForm.subtitleRenderMode === 'plain'}" style="padding:8px 12px;">
+                <input type="radio" v-model="editForm.subtitleRenderMode" value="plain"> 仅 SRT（简单样式）
+              </label>
+            </div>
+            <p v-if="editForm.subtitleRenderMode === 'plain'" style="font-size:12px;color:#909399;margin:-8px 0 12px 0;">仅传 SRT 不转 ASS，成本更低，适合简单字幕。</p>
+
+            <template v-if="editForm.subtitleRenderMode === 'effect'">
             <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:#606266">1. 预设风格</div>
             <div class="style-presets" style="display:flex; gap:10px; overflow-x:auto; padding-bottom:8px; margin-bottom:16px;">
               <div 
@@ -701,8 +758,9 @@
                 </div>
               </div>
             </div>
-            
-             <div class="edit-row" style="margin-top:16px; padding-top:12px; border-top:1px solid #eee;">
+            </template>
+
+            <div class="edit-row" style="margin-top:16px; padding-top:12px; border-top:1px solid #eee;">
                   <button 
                   class="btn btn-primary" 
                   :disabled="isImsSubmitting"
@@ -736,6 +794,9 @@
               <span class="spinner" v-if="generateLoading"></span>
               <span>{{ generateLoading ? '正在生成中...' : '一键生成AI剪辑视频' }}</span>
             </button>
+            <p v-if="editForm.subtitleEnabled && editForm.subtitleScheme === 'simple'" class="generate-hint" style="margin-top:8px;font-size:12px;color:#67C23A;">
+              简单模式 · 本地烧录字幕（原有逻辑）
+            </p>
             
             <div class="progress-wrapper" v-if="progress.show">
               <div class="progress-info">
@@ -1089,6 +1150,10 @@ const editForm = ref({
 
   // ✅ 新增
   subtitleAnimation: 'none',
+  // 成片方式：simple=简单模式(本地FFmpeg)，ims=字幕渲染(走IMS)
+  subtitleScheme: 'simple',
+  // 字幕渲染方式（仅当 subtitleScheme==ims 时）：effect=字幕特效(ASS)，plain=仅SRT
+  subtitleRenderMode: 'effect',
 
   filter: 'original',
   filterIntensity: 1.0
@@ -1198,11 +1263,22 @@ const handleImsSubmit = async () => {
   // 5. 校验通过，提交任务
   isImsSubmitting.value = true;
   try {
+    // 成片分辨率，用于字幕 ASS 适配视频大小（按视频比例）
+    const ratio = (editForm.value.ratio || editForm.value.resolution || 'auto').toString();
+    let videoWidth = 1080, videoHeight = 1920;
+    if (ratio === '16:9') { videoWidth = 1920; videoHeight = 1080; }
+    else if (ratio === '9:16' || ratio === 'auto') { videoWidth = 1080; videoHeight = 1920; }
+    else if (ratio === '1:1') { videoWidth = 1080; videoHeight = 1080; }
+    else { videoWidth = 1080; videoHeight = 1920; }
+
     const payload = {
       video_url: videoUrl,
       subtitle_url: currentSubUrl,
       voice_url: voiceUrl,
       bgm_url: bgmUrl,
+      video_width: videoWidth,
+      video_height: videoHeight,
+      subtitle_render_mode: editForm.value.subtitleRenderMode || 'effect',
       subtitle_params: {
         subtitlePreset: editForm.value.subtitlePreset,
         subtitleFontSize: editForm.value.subtitleFontSize,
@@ -1293,6 +1369,8 @@ const exportUrl = ref('')
 const recognizedText = ref('')  // 从音频识别的文字
 const subtitleUrl = ref('')      // 存 http 链接，给阿里云 IMS 用
 const subtitleLocalPath = ref('') // 存 uploads 路径，给本地 FFmpeg 用
+// 方案 C：按句时间戳，用于分段编辑错别字（讯飞 ASR 返回时有值）
+const subtitleTimestamps = ref([])  // [{ text, start, end, duration? }, ...]
 const progress = ref({ show: false, value: 0, text: '' })
 
 // 历史任务
@@ -2007,6 +2085,18 @@ async function handleSubPreview() {
         recognizedText.value = recognizedTextFromApi
         ElMessage.success(`已从配音识别出 ${recognizedTextFromApi.length} 字`)
       }
+      // 方案 C：保存时间戳，用于分段编辑错别字
+      const ts = response.data?.timestamps
+      if (ts && Array.isArray(ts) && ts.length > 0) {
+        subtitleTimestamps.value = ts.map(t => ({
+          text: t.text != null ? String(t.text) : '',
+          start: typeof t.start === 'number' ? t.start : parseFloat(t.start) || 0,
+          end: typeof t.end === 'number' ? t.end : parseFloat(t.end) || 0,
+          ...(t.duration != null && { duration: typeof t.duration === 'number' ? t.duration : parseFloat(t.duration) })
+        }))
+      } else {
+        subtitleTimestamps.value = []
+      }
 
       // B. 处理路径存储
       if (cloudUrl) {
@@ -2035,6 +2125,57 @@ async function handleSubPreview() {
     console.error("字幕预览异常:", error)
     ElMessage.error(`字幕生成异常：${error.message || '请求失败'}`)
   }
+}
+
+// 方案 C：用修改后的时间戳重新生成字幕（保留时间轴，只更新文字）
+const subtitleRegenerating = ref(false)
+async function handleRegenerateSubtitleFromTimestamps() {
+  if (!subtitleTimestamps.value || subtitleTimestamps.value.length === 0) {
+    ElMessage.warning('没有可用的时间戳，请先点击“生成字幕预览”')
+    return
+  }
+  let voiceId = props.timeline?.voice?.materialId || localVoiceState.value?.materialId
+  if (!voiceId) {
+    ElMessage.warning('请先设置配音轨')
+    return
+  }
+  subtitleRegenerating.value = true
+  try {
+    const payload = {
+      audio_material_id: voiceId,
+      timestamps: subtitleTimestamps.value
+    }
+    const response = await aiApi.generateSubtitle(payload)
+    if (response.code === 200) {
+      const cloudUrl = response.data?.preview_url || response.data?.url
+      const localPath = response.data?.path
+      if (localPath) subtitleLocalPath.value = localPath
+      if (cloudUrl) {
+        subtitleUrl.value = cloudUrl.startsWith('http') ? cloudUrl : cloudUrl
+        if (cloudUrl.startsWith('http')) {
+          ElMessage.success('已按修改后的内容重新生成字幕')
+        } else {
+          ElMessage.warning('字幕已重新生成，但尚未同步至云端')
+        }
+      } else {
+        ElMessage.warning('未获取到字幕文件路径')
+      }
+    } else {
+      ElMessage.error(response.message || '重新生成字幕失败')
+    }
+  } catch (e) {
+    console.error('重新生成字幕异常:', e)
+    ElMessage.error(e.message || '请求失败')
+  } finally {
+    subtitleRegenerating.value = false
+  }
+}
+
+function formatSubtitleTime(seconds) {
+  const s = Math.max(0, Number(seconds))
+  const m = Math.floor(s / 60)
+  const sec = (s % 60).toFixed(1)
+  return `${m}:${sec.padStart(4, '0')}`
 }
 
 
@@ -2096,14 +2237,18 @@ async function handleGenerate() {
       voice_volume: voiceVolume,
       filter_type: editForm.value.filter,
       filter_intensity: editForm.value.filterIntensity,
-      subtitle_params: {
-        subtitlePreset: editForm.value.subtitlePreset,
-        subtitleFontSize: editForm.value.subtitleFontSize,
-        subtitleColor: editForm.value.subtitleColor,
-        subtitleOutlineColor: editForm.value.subtitleOutlineColor,
-        subtitleY: editForm.value.subtitleY,
-        subtitleAnimation: editForm.value.subtitleAnimation
-      }
+      // 简单模式不传字幕样式，后端用 min_dim 自适应字号/边距
+      subtitle_scheme: editForm.value.subtitleScheme || 'simple',
+      ...(editForm.value.subtitleScheme === 'ims' ? {
+        subtitle_params: {
+          subtitlePreset: editForm.value.subtitlePreset,
+          subtitleFontSize: editForm.value.subtitleFontSize,
+          subtitleColor: editForm.value.subtitleColor,
+          subtitleOutlineColor: editForm.value.subtitleOutlineColor,
+          subtitleY: editForm.value.subtitleY,
+          subtitleAnimation: editForm.value.subtitleAnimation
+        }
+      } : {})
     })
 
     if (response.code === 200) {
@@ -3485,6 +3630,46 @@ onBeforeUnmount(() => {
   border: 1px solid #e9ecef;
   max-height: 120px;
   overflow-y: auto;
+}
+
+.subtitle-segment-label {
+  font-size: 12px;
+  color: #666;
+  margin-bottom: 10px;
+}
+
+.subtitle-segment-list {
+  max-height: 200px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+
+.subtitle-segment-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.subtitle-segment-time {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #888;
+  font-family: monospace;
+  min-width: 100px;
+}
+
+.subtitle-segment-input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.subtitle-segment-input:focus {
+  outline: none;
+  border-color: #409EFF;
 }
 
 .subtitle-file-info {

@@ -50,7 +50,7 @@
           </template>
         </el-table-column>
         <el-table-column prop="merchant_name" label="关联商家" width="150" />
-        <el-table-column prop="video_count" label="视频数" width="100" />
+        <el-table-column prop="video_count" label="视频总数" width="100" />
         <el-table-column prop="published_count" label="已发布" width="100" />
         <el-table-column prop="pending_count" label="待发布" width="100" />
         <el-table-column prop="distribution_mode" label="分发模式" width="150">
@@ -68,7 +68,7 @@
             {{ row.publish_time ? new Date(row.publish_time).toLocaleString('zh-CN') : '-' }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="handleEdit(row)">编辑</el-button>
             <el-button link type="danger" size="small" @click="handleDelete(row)">删除</el-button>
@@ -349,7 +349,8 @@ const getStatusText = (status) => {
   const map = {
     'pending': '待发布',
     'publishing': '发布中',
-    'completed': '发布成功',
+    'completed': '已发布',
+    'partial_completed': '部分完成',
     'failed': '发布失败'
   }
   return map[status] || status
@@ -360,6 +361,7 @@ const getStatusType = (status) => {
     'pending': 'warning',
     'publishing': 'info',
     'completed': 'success',
+    'partial_completed': 'warning',
     'failed': 'danger'
   }
   return map[status] || 'info'
@@ -543,10 +545,8 @@ const handleSubmit = async () => {
       return
     }
     
-    // 显示创建/更新成功消息
     ElMessage.success(form.value.id ? '更新成功' : '创建成功')
     
-    // 第二步：添加视频和保存发布信息（异步执行，不影响用户体验）
     try {
       console.log('开始添加视频和保存发布信息...', { planId, publishMode: form.value.publish_mode })
       
@@ -555,33 +555,19 @@ const handleSubmit = async () => {
         for (const it of phasedItems.value) {
           const video = videoLibrary.value.find(v => v.id === it.video_id)
           if (video) {
-            console.log('添加视频:', { videoId: it.video_id, videoName: video.video_name })
+            console.log('添加视频:', { videoId: it.video_id, videoName: video.video_name, scheduleTime: it.schedule_time })
             const addVideoResponse = await addVideoToPlan(planId, {
               video_url: video.video_url,
               video_title: video.video_name || '',
-              thumbnail_url: video.thumbnail_url || ''
+              thumbnail_url: video.thumbnail_url || '',
+              publish_time: it.schedule_time
             })
             console.log('添加视频响应:', addVideoResponse)
           }
         }
-        
-        console.log('保存分阶段发布信息...')
-        const saveInfoResponse = await savePublishInfo(planId, {
-          publish_schedule: {
-            mode: 'phased',
-            items: phasedItems.value.map(it => {
-              const v = videoLibrary.value.find(x => x.id === it.video_id)
-              return {
-                video_id: it.video_id,
-                video_url: v?.video_url,
-                schedule_time: it.schedule_time
-              }
-            })
-          }
-        })
-        console.log('保存发布信息响应:', saveInfoResponse)
       } else {
         console.log('批量发布，视频数量:', batchVideoIds.value.length)
+        const batchPublishTime = batchTime.value || form.value.publish_time || null
         for (const vid of batchVideoIds.value) {
           const video = videoLibrary.value.find(v => v.id === vid)
           if (video) {
@@ -589,42 +575,24 @@ const handleSubmit = async () => {
             const addVideoResponse = await addVideoToPlan(planId, {
               video_url: video.video_url,
               video_title: video.video_name || '',
-              thumbnail_url: video.thumbnail_url || ''
+              thumbnail_url: video.thumbnail_url || '',
+              publish_time: batchPublishTime
             })
             console.log('添加视频响应:', addVideoResponse)
           }
         }
-        
-        console.log('保存批量发布信息...')
-        const saveInfoResponse = await savePublishInfo(planId, {
-          publish_schedule: {
-            mode: 'batch',
-            items: batchVideoIds.value.map(vid => {
-              const v = videoLibrary.value.find(x => x.id === vid)
-              return {
-                video_id: vid,
-                video_url: v?.video_url
-              }
-            }),
-            batch_time: batchTime.value || form.value.publish_time || ''
-          }
-        })
-        console.log('保存发布信息响应:', saveInfoResponse)
       }
       
       console.log('所有步骤成功完成！')
     } catch (error) {
-      // 视频添加或发布信息保存失败（仅记录日志，不影响用户体验）
-      console.error('添加视频或保存发布信息失败:', error)
+      console.error('添加视频失败:', error)
       console.error('错误详情:', error.response || error)
     } finally {
-      // 关闭对话框并刷新列表
       console.log('关闭对话框并刷新列表...')
       dialogVisible.value = false
       loadPlans()
     }
   } catch (error) {
-    // 其他未知错误
     ElMessage.error('操作失败')
     console.error('未知错误:', error)
   }

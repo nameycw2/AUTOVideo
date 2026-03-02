@@ -271,40 +271,67 @@ def synthesize_speech_with_timestamps(
     if not sentences:
         raise RuntimeError("text is empty or cannot be split")
 
-    audio_segments: List[bytes] = []
+    resolved_voice = resolve_voice(voice)
+    try:
+        s = int(speed)
+    except Exception:
+        s = 5
+    s = max(0, min(s, 15))
+    speech_rate = 0.6 + (s / 15.0) * 1.0
+
+    try:
+        v = int(volume)
+    except Exception:
+        v = 5
+    v = max(0, min(v, 15))
+    mapped_volume = int(20 + (v / 15.0) * 80)
+
+    # Build sentence segments in WAV first, then convert once at the end.
+    # This avoids per-segment MP3 encoder delay accumulation, which can cause
+    # subtitle/voice drift on long scripts.
+    wav_segments: List[bytes] = []
     timestamps: List[Dict[str, Any]] = []
     current = 0.0
 
-    ext = (audio_format or "mp3").lower()
-    for s in sentences:
-        seg = synthesize_speech(text=s, voice=voice, speed=speed, pitch=pitch, volume=volume, audio_format=ext)
-        audio_segments.append(seg)
-        dur = _probe_duration_seconds(seg, suffix="." + ext)
-        timestamps.append({"text": s, "start": current, "end": current + dur, "duration": dur})
+    for sentence in sentences:
+        seg_wav = _dashscope_synthesize_wav_bytes(
+            text=sentence,
+            voice=resolved_voice,
+            speech_rate=speech_rate,
+            volume=mapped_volume,
+        )
+        wav_segments.append(seg_wav)
+        dur = _probe_duration_seconds(seg_wav, suffix=".wav")
+        timestamps.append({"text": sentence, "start": current, "end": current + dur, "duration": dur})
         current += dur
 
-    if len(audio_segments) == 1:
-        return audio_segments[0], timestamps
+    if len(wav_segments) == 1:
+        merged_wav = wav_segments[0]
+    else:
+        ffmpeg = _resolve_ffmpeg_exe()
+        with tempfile.TemporaryDirectory() as td:
+            files: List[str] = []
+            for i, b in enumerate(wav_segments):
+                p = os.path.join(td, f"seg_{i}.wav")
+                with open(p, "wb") as f:
+                    f.write(b)
+                files.append(p)
 
-    ffmpeg = _resolve_ffmpeg_exe()
-    with tempfile.TemporaryDirectory() as td:
-        files: List[str] = []
-        for i, b in enumerate(audio_segments):
-            p = os.path.join(td, f"seg_{i}.{ext}")
-            with open(p, "wb") as f:
-                f.write(b)
-            files.append(p)
+            list_path = os.path.join(td, "list.txt")
+            with open(list_path, "w", encoding="utf-8") as f:
+                for p in files:
+                    escaped_path = p.replace("'", "'\\''")
+                    f.write(f"file '{escaped_path}'\n")
 
-        list_path = os.path.join(td, "list.txt")
-        with open(list_path, "w", encoding="utf-8") as f:
-            for p in files:
-                escaped_path = p.replace("'", "'\\''")
-                f.write(f"file '{escaped_path}'\n")
+            out_wav_path = os.path.join(td, f"merged_{uuid.uuid4().hex}.wav")
+            cmd = [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", out_wav_path]
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with open(out_wav_path, "rb") as f:
+                merged_wav = f.read()
 
-        out_path = os.path.join(td, f"merged_{uuid.uuid4().hex}.{ext}")
-        cmd = [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", out_path]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        with open(out_path, "rb") as f:
-            merged = f.read()
-
-    return merged, timestamps
+    fmt = (audio_format or "mp3").lower()
+    if fmt == "wav":
+        return merged_wav, timestamps
+    if fmt == "mp3":
+        return _maybe_convert_wav_to_mp3(merged_wav), timestamps
+    raise RuntimeError(f"Unsupported audio_format={audio_format}; use mp3 or wav")

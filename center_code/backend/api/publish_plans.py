@@ -84,14 +84,10 @@ def get_publish_plans():
             
             plans_list = []
             for plan in plans:
-                # 获取关联的商家名称
                 merchant_name = None
                 if plan.merchant_id:
                     merchant = db.query(Merchant).filter(Merchant.id == plan.merchant_id).first()
                     merchant_name = merchant.merchant_name if merchant else None
-                
-                # 获取计划中的视频数量
-                video_count = db.query(PlanVideo).filter(PlanVideo.plan_id == plan.id).count()
                 
                 plans_list.append({
                     'id': plan.id,
@@ -99,7 +95,7 @@ def get_publish_plans():
                     'platform': plan.platform,
                     'merchant_id': plan.merchant_id,
                     'merchant_name': merchant_name,
-                    'video_count': video_count,
+                    'video_count': plan.video_count,
                     'published_count': plan.published_count,
                     'pending_count': plan.pending_count,
                     'claimed_count': plan.claimed_count,
@@ -292,7 +288,7 @@ def get_publish_plan(plan_id):
                 'platform': plan.platform,
                 'merchant_id': plan.merchant_id,
                 'merchant_name': merchant_name,
-                'video_count': len(videos_list),
+                'video_count': plan.video_count,
                 'videos': videos_list,
                 'published_count': plan.published_count,
                 'pending_count': plan.pending_count,
@@ -448,6 +444,96 @@ def delete_publish_plan(plan_id):
         return response_error(str(e), 500)
 
 
+@publish_plans_bp.route('/<int:plan_id>/execute', methods=['POST'])
+@login_required
+def execute_publish_plan(plan_id):
+    """
+    手动触发发布计划执行接口
+    
+    请求方法: POST
+    路径: /api/publish-plans/{plan_id}/execute
+    认证: 需要登录
+    
+    路径参数:
+        plan_id (int): 发布计划ID
+    
+    返回数据:
+        成功 (200):
+        {
+            "code": 200,
+            "message": "发布计划已触发执行",
+            "data": {
+                "plan_id": int,
+                "status": "publishing"
+            }
+        }
+        
+        失败 (400/404/500):
+        {
+            "code": 400/404/500,
+            "message": "错误信息",
+            "data": null
+        }
+    
+    说明:
+        - 只有状态为 'pending' 的计划可以触发执行
+        - 触发后计划状态变为 'publishing'
+        - 系统会为每个待发布视频创建上传任务
+    """
+    try:
+        with get_db() as db:
+            plan = db.query(PublishPlan).filter(PublishPlan.id == plan_id).first()
+            
+            if not plan:
+                return response_error('发布计划不存在', 404)
+            
+            if plan.status != 'pending':
+                return response_error(f'只有待发布状态的计划可以执行，当前状态: {plan.status}', 400)
+            
+            videos = db.query(PlanVideo).filter(
+                PlanVideo.plan_id == plan.id,
+                PlanVideo.status == 'pending'
+            ).all()
+            
+            if not videos:
+                return response_error('该计划没有待发布的视频', 400)
+            
+            from models import Account
+            accounts = db.query(Account).filter(
+                Account.platform == plan.platform,
+                Account.login_status == 'logged_in'
+            ).all()
+            
+            if not accounts:
+                return response_error(f'平台 {plan.platform} 没有已登录的账号', 400)
+            
+            plan.status = 'publishing'
+            plan.publish_time = datetime.now()
+            plan.updated_at = datetime.now()
+            db.commit()
+            
+            def trigger_task_processing():
+                try:
+                    from services.task_processor import get_task_processor
+                    task_processor = get_task_processor()
+                    task_processor._process_pending_tasks()
+                except Exception as e:
+                    print(f"[发布计划] 触发任务处理失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            import threading
+            thread = threading.Thread(target=trigger_task_processing, daemon=True)
+            thread.start()
+            
+            return response_success({
+                'plan_id': plan_id,
+                'status': 'publishing'
+            }, '发布计划已触发执行')
+    except Exception as e:
+        return response_error(str(e), 500)
+
+
 @publish_plans_bp.route('/<int:plan_id>/videos', methods=['POST'])
 @login_required
 def add_video_to_plan(plan_id):
@@ -496,23 +582,29 @@ def add_video_to_plan(plan_id):
         video_url = data.get('video_url')
         video_title = data.get('video_title')
         thumbnail_url = data.get('thumbnail_url')
+        publish_time = data.get('publish_time')
         
         if not video_url:
             return response_error('video_url is required', 400)
+        
+        parsed_publish_time = None
+        if publish_time:
+            try:
+                parsed_publish_time = datetime.fromisoformat(publish_time)
+            except ValueError:
+                return response_error('Invalid publish_time format', 400)
         
         with get_db() as db:
             plan = db.query(PublishPlan).filter(PublishPlan.id == plan_id).first()
             if not plan:
                 return response_error('Publish plan not found', 404)
             
-            # 检查视频是否已经存在于该计划中（避免重复添加）
             existing_video = db.query(PlanVideo).filter(
                 PlanVideo.plan_id == plan_id,
                 PlanVideo.video_url == video_url
             ).first()
             
             if existing_video:
-                # 如果视频已存在，返回已存在的视频信息（不报错，但提示用户）
                 return response_success({
                     'id': existing_video.id,
                     'video_url': existing_video.video_url,
@@ -525,21 +617,29 @@ def add_video_to_plan(plan_id):
                 video_url=video_url,
                 video_title=video_title,
                 thumbnail_url=thumbnail_url,
+                publish_time=parsed_publish_time,
                 status='pending'
             )
             db.add(video)
+            db.flush()
             
-            # 更新计划的视频数量
             plan.video_count = db.query(PlanVideo).filter(PlanVideo.plan_id == plan_id).count()
+            plan.published_count = db.query(PlanVideo).filter(
+                PlanVideo.plan_id == plan_id,
+                PlanVideo.status == 'published'
+            ).count()
+            plan.pending_count = plan.video_count - plan.published_count
             plan.updated_at = datetime.now()
             
             db.commit()
             
-            # 如果发布时间接近当前时间（1分钟内），触发任务处理
+            # 如果视频发布时间为空（立即）或已到，触发任务处理
             # 注意：使用全局任务处理器，避免数据库会话冲突
             now = datetime.now()
-            if plan.publish_time and (now - plan.publish_time).total_seconds() <= 60:
-                print(f"[发布计划] 检测到发布时间接近当前时间，将在数据库会话外触发任务处理: {plan.plan_name} (ID: {plan.id})")
+            should_trigger = (video.publish_time is None) or (video.publish_time <= now)
+            
+            if should_trigger:
+                print(f"[发布计划] 检测到需要触发任务处理: {plan.plan_name} (ID: {plan.id}), status={plan.status}")
                 # 使用全局任务处理器，在数据库会话外触发处理
                 def trigger_task_processing():
                     try:
@@ -637,11 +737,16 @@ def get_plan_videos_history():
             # 构建返回数据
             items = []
             for plan_video, plan in results:
-                # 查找对应的 VideoTask 和 Account
+                # 优先按 plan_video_id 关联任务，避免同 URL 误匹配
                 video_task = db.query(VideoTask).filter(
-                    VideoTask.video_url == plan_video.video_url,
-                    VideoTask.account_id.isnot(None)
-                ).first()
+                    VideoTask.plan_video_id == plan_video.id
+                ).order_by(VideoTask.id.desc()).first()
+                if not video_task:
+                    # 兼容历史数据（旧任务可能没有 plan_video_id）
+                    video_task = db.query(VideoTask).filter(
+                        VideoTask.video_url == plan_video.video_url,
+                        VideoTask.account_id.isnot(None)
+                    ).order_by(VideoTask.id.desc()).first()
                 
                 account_name = None
                 account_id = None
@@ -650,6 +755,28 @@ def get_plan_videos_history():
                     if account:
                         account_name = account.account_name
                         account_id = account.id
+
+                # 统一状态口径，前端按 completed/processing/pending/failed 展示
+                status = plan_video.status or 'pending'
+                if status == 'published':
+                    status = 'completed'
+                elif status == 'processing':
+                    status = 'processing'
+                elif status == 'pending' and video_task:
+                    if video_task.status in ('uploading', 'processing'):
+                        status = 'processing'
+                    elif video_task.status in ('completed',):
+                        status = 'completed'
+                    elif video_task.status in ('failed',):
+                        status = 'failed'
+
+                progress = 0
+                error_message = None
+                if video_task:
+                    progress = int(video_task.progress or 0)
+                    error_message = video_task.error_message
+                if status == 'completed':
+                    progress = 100
                 
                 items.append({
                     'id': plan_video.id,
@@ -660,9 +787,12 @@ def get_plan_videos_history():
                     'account_id': account_id,
                     'account_name': account_name or '-',
                     'platform': plan.platform,
-                    'status': plan_video.status,
-                    'publish_time': plan.publish_time.isoformat() if plan.publish_time else None,
-                    'created_at': plan_video.created_at.isoformat() if plan_video.created_at else None
+                    'status': status,
+                    'progress': progress,
+                    'error_message': error_message,
+                    'publish_time': (plan_video.publish_time or plan.publish_time).isoformat() if (plan_video.publish_time or plan.publish_time) else None,
+                    'created_at': plan_video.created_at.isoformat() if plan_video.created_at else None,
+                    'task_id': video_task.id if video_task else None,
                 })
             
             return response_success({
@@ -729,4 +859,3 @@ def save_publish_info(plan_id):
         return response_success({'plan_id': plan_id}, 'Publish info saved (placeholder)')
     except Exception as e:
         return response_error(str(e), 500)
-

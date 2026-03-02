@@ -27,4 +27,3 @@ export const addVideoToPlan = (planId, data) => {
 export const savePublishInfo = (planId, data) => {
   return apiClient.post(`/publish-plans/${planId}/save-info`, data)
 }
-

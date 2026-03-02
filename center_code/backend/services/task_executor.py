@@ -418,19 +418,67 @@ async def execute_video_upload(task_id: int):
                     douyin_logger.info(f"Downloading video from URL: {video_path}")
                 print(f"[VIDEO PATH DEBUG] Downloading from URL: {video_path}")
                 
-                response = requests.get(video_path, stream=True, timeout=300)
-                response.raise_for_status()
+                # 尝试下载视频，如果失败则尝试刷新COS URL重试
+                download_success = False
+                download_error = None
+                current_url = video_path
                 
-                # 保存到临时文件
-                temp_video_file = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
-                for chunk in response.iter_content(chunk_size=8192):
-                    temp_video_file.write(chunk)
-                temp_video_file.close()
+                for attempt in range(2):  # 最多尝试2次
+                    try:
+                        print(f"[VIDEO PATH DEBUG] 尝试下载 (第{attempt+1}次): {current_url[:200]}...")
+                        response = requests.get(current_url, stream=True, timeout=300)
+                        response.raise_for_status()
+                        
+                        # 保存到临时文件
+                        temp_video_file = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
+                        for chunk in response.iter_content(chunk_size=8192):
+                            temp_video_file.write(chunk)
+                        temp_video_file.close()
+                        
+                        video_path = temp_video_file.name
+                        download_success = True
+                        if douyin_logger:
+                            douyin_logger.info(f"Video downloaded to: {video_path}")
+                        print(f"[VIDEO PATH DEBUG] Video downloaded to: {video_path}")
+                        break
+                    except requests.exceptions.HTTPError as e:
+                        download_error = e
+                        if e.response.status_code in [403, 404]:
+                            # 403 Forbidden 或 404 Not Found，可能是URL过期
+                            print(f"[VIDEO PATH DEBUG] 下载失败 (HTTP {e.response.status_code})，尝试刷新COS URL...")
+                            if douyin_logger:
+                                douyin_logger.warning(f"视频下载失败 (HTTP {e.response.status_code})，尝试刷新COS URL...")
+                            
+                            # 尝试刷新COS URL
+                            try:
+                                from blueprints.video_library import _refresh_cos_url_if_needed, _extract_cos_key_from_url
+                                cos_key = _extract_cos_key_from_url(current_url)
+                                if cos_key:
+                                    from utils.cos_service import get_file_url
+                                    new_url = get_file_url(cos_key, use_presigned=True, expires_in=86400)
+                                    if new_url and new_url != current_url:
+                                        print(f"[VIDEO PATH DEBUG] COS URL已刷新，重试下载...")
+                                        current_url = new_url
+                                        continue
+                            except Exception as refresh_error:
+                                print(f"[VIDEO PATH DEBUG] 刷新COS URL失败: {refresh_error}")
+                                if douyin_logger:
+                                    douyin_logger.error(f"刷新COS URL失败: {refresh_error}")
+                        raise
+                    except requests.exceptions.RequestException as e:
+                        download_error = e
+                        raise
                 
-                video_path = temp_video_file.name
-                if douyin_logger:
-                    douyin_logger.info(f"Video downloaded to: {video_path}")
-                print(f"[VIDEO PATH DEBUG] Video downloaded to: {video_path}")
+                if not download_success:
+                    error_msg = f"视频下载失败: {download_error}"
+                    print(f"[VIDEO PATH ERROR] {error_msg}")
+                    if douyin_logger:
+                        douyin_logger.error(error_msg)
+                    task.status = 'failed'
+                    task.error_message = error_msg
+                    task.completed_at = datetime.now()
+                    db.commit()
+                    return
             elif video_path.startswith('/'):
                 # 相对路径，可能是 /uploads/videos/xxx 格式
                 # 转换为绝对路径
@@ -459,19 +507,16 @@ async def execute_video_upload(task_id: int):
             print(f"[VIDEO PATH DEBUG] Is file: {os.path.isfile(video_path) if os.path.exists(video_path) else 'N/A'}")
             
             if not os.path.exists(video_path):
-                # 尝试查找类似的文件
                 dir_path = os.path.dirname(video_path)
                 if os.path.exists(dir_path):
                     print(f"[VIDEO PATH DEBUG] Directory contents: {os.listdir(dir_path)[:10]}")
                 
-                # 视频文件不存在，将任务状态更新为完成并返回，避免重复执行
                 print(f"[VIDEO PATH ERROR] 视频文件不存在: {video_path}")
                 if douyin_logger:
                     douyin_logger.error(f"Video file not found: {video_path}")
                 
-                # 将任务状态标记为completed而不是failed，避免再次执行
-                task.status = 'completed'
-                task.error_message = f"任务已标记为完成（原因为视频文件不存在：{video_path}）"
+                task.status = 'failed'
+                task.error_message = f"视频文件不存在：{video_path}。请检查视频是否已从视频库删除，或重新选择视频后重试。"
                 task.completed_at = datetime.now()
                 db.commit()
                 
@@ -594,6 +639,20 @@ async def execute_video_upload(task_id: int):
                 if douyin_logger:
                     douyin_logger.error(f"Video task {task_id} not found after upload")
                 return
+
+            # 超时保护：若任务已被超时规则标记为 failed，则不再回写 completed/published
+            if task.status == 'failed' and task.error_message and '45秒' in task.error_message:
+                print(f"[TASK STATUS] 任务 {task_id} 已被超时规则标记失败，跳过成功回写")
+                if douyin_logger:
+                    douyin_logger.warning(f"Task {task_id} timed out by scheduler, skip success write-back")
+                try:
+                    if os.path.exists(account_file):
+                        os.remove(account_file)
+                    if temp_video_file and os.path.exists(temp_video_file.name):
+                        os.remove(temp_video_file.name)
+                except:
+                    pass
+                return
             
             # 更新cookies到数据库
             # updated_cookies 可能是 cookies 字典，也可能是 {"upload_success": True} 标记
@@ -618,55 +677,64 @@ async def execute_video_upload(task_id: int):
                     save_cookies_to_db(task.account_id, updated_cookies, db)
                     cookies_updated = True
             
-            # 无论cookies是否更新成功，都要更新任务状态为完成
-            # 因为视频已经发布成功了（execute_upload 正常返回表示上传成功）
             print(f"[TASK STATUS] 视频发布成功，更新任务 {task_id} 状态为 completed...")
             
-            # 更新对应的 PlanVideo 状态为 published（如果该任务来自发布计划）
             try:
                 from models import PlanVideo, PublishPlan
-                plan_video = db.query(PlanVideo).filter(
-                    PlanVideo.video_url == task.video_url,
-                    PlanVideo.status == 'processing'  # 只更新处理中的视频
-                ).first()
-                if plan_video:
-                    plan_video.status = 'published'
+                if task.plan_video_id:
+                    plan_video = db.query(PlanVideo).filter(
+                        PlanVideo.id == task.plan_video_id
+                    ).first()
                     
-                    # 更新发布计划的统计信息
-                    plan = db.query(PublishPlan).filter(PublishPlan.id == plan_video.plan_id).first()
-                    if plan:
-                        # 重新统计
-                        published_count = db.query(PlanVideo).filter(
-                            PlanVideo.plan_id == plan.id,
-                            PlanVideo.status == 'published'
-                        ).count()
-                        processing_count = db.query(PlanVideo).filter(
-                            PlanVideo.plan_id == plan.id,
-                            PlanVideo.status == 'processing'
-                        ).count()
-                        pending_count = db.query(PlanVideo).filter(
-                            PlanVideo.plan_id == plan.id,
-                            PlanVideo.status == 'pending'
-                        ).count()
+                    if plan_video and plan_video.status != 'published':
+                        plan_video.status = 'published'
+                        db.flush()
                         
-                        plan.published_count = published_count
-                        plan.pending_count = pending_count
-                        plan.updated_at = datetime.now()
+                        plan = db.query(PublishPlan).filter(PublishPlan.id == plan_video.plan_id).first()
+                        if plan:
+                            published_count = db.query(PlanVideo).filter(
+                                PlanVideo.plan_id == plan.id,
+                                PlanVideo.status == 'published'
+                            ).count()
+                            failed_count = db.query(PlanVideo).filter(
+                                PlanVideo.plan_id == plan.id,
+                                PlanVideo.status == 'failed'
+                            ).count()
+                            pending_only_count = db.query(PlanVideo).filter(
+                                PlanVideo.plan_id == plan.id,
+                                PlanVideo.status == 'pending'
+                            ).count()
+                            processing_count = db.query(PlanVideo).filter(
+                                PlanVideo.plan_id == plan.id,
+                                PlanVideo.status == 'processing'
+                            ).count()
+                            
+                            plan.published_count = published_count
+                            plan.failed_count = failed_count
+                            plan.pending_count = plan.video_count - published_count
+                            plan.updated_at = datetime.now()
+                            
+                            print(f"[TASK STATUS] 发布计划 {plan.id} 统计: 已发布={published_count}, 处理中={processing_count}, 失败={failed_count}, 待发布={plan.pending_count}, 总数={plan.video_count}")
+                            
+                            if published_count == plan.video_count:
+                                plan.status = 'completed'
+                                print(f"[TASK STATUS] 发布计划 {plan.id} 全部发布成功，状态更新为 completed")
+                            elif pending_only_count == 0 and processing_count == 0:
+                                if published_count > 0 and failed_count > 0:
+                                    plan.status = 'partial_completed'
+                                    print(f"[TASK STATUS] 发布计划 {plan.id} 部分完成（成功{published_count}，失败{failed_count}），状态更新为 partial_completed")
+                                elif failed_count > 0:
+                                    plan.status = 'failed'
+                                    print(f"[TASK STATUS] 发布计划 {plan.id} 全部失败，状态更新为 failed")
                         
-                        # 如果所有视频都已处理完成，标记计划为 completed
-                        if pending_count == 0 and processing_count == 0:
-                            plan.status = 'completed'
-                            print(f"[TASK STATUS] 发布计划 {plan.id} 所有视频已处理完成，状态更新为 completed")
-                    
-                    db.commit()
-                    print(f"[TASK STATUS] 已更新发布计划视频状态: PlanVideo {plan_video.id} -> published")
-                    if douyin_logger:
-                        douyin_logger.info(f"已更新发布计划视频状态: PlanVideo {plan_video.id} -> published")
+                        print(f"[TASK STATUS] 已更新 PlanVideo {plan_video.id} 状态为 published")
+                        if douyin_logger:
+                            douyin_logger.info(f"已更新 PlanVideo {plan_video.id} 状态为 published")
             except Exception as plan_video_error:
-                # 如果更新 PlanVideo 失败，不影响任务状态更新
                 print(f"[TASK STATUS] 更新 PlanVideo 状态失败（不影响任务完成）: {plan_video_error}")
                 if douyin_logger:
                     douyin_logger.warning(f"更新 PlanVideo 状态失败: {plan_video_error}")
+            
             if douyin_logger:
                 douyin_logger.info(f"视频发布成功，更新任务 {task_id} 状态为 completed...")
             
@@ -723,7 +791,6 @@ async def execute_video_upload(task_id: int):
                     if douyin_logger:
                         douyin_logger.success(f"Task {task_id} status updated to completed after retry")
             
-            # 清理临时文件
             try:
                 if os.path.exists(account_file):
                     os.remove(account_file)
@@ -736,63 +803,69 @@ async def execute_video_upload(task_id: int):
             if douyin_logger:
                 douyin_logger.error(f"Video task {task_id} failed: {e}")
             
-            # 重新查询任务，确保对象在会话中
             task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
             if task:
                 task.status = 'failed'
                 task.error_message = str(e)
                 task.completed_at = datetime.now()
                 db.commit()
-                
-                # 保存 video_url 用于后续查询 PlanVideo
-                video_url = task.video_url
-            else:
-                # 如果任务不存在，无法更新 PlanVideo
-                video_url = None
             
-            # 更新对应的 PlanVideo 状态为 failed（如果该任务来自发布计划）
-            if video_url:
-                try:
-                    from models import PlanVideo, PublishPlan
+            try:
+                from models import PlanVideo, PublishPlan
+                if task and task.plan_video_id:
                     plan_video = db.query(PlanVideo).filter(
-                        PlanVideo.video_url == video_url,
-                        PlanVideo.status == 'processing'  # 只更新处理中的视频
+                        PlanVideo.id == task.plan_video_id
                     ).first()
-                    if plan_video:
+                    
+                    if plan_video and plan_video.status not in ['published', 'failed']:
                         plan_video.status = 'failed'
+                        db.flush()
                         
-                        # 更新发布计划的统计信息
                         plan = db.query(PublishPlan).filter(PublishPlan.id == plan_video.plan_id).first()
                         if plan:
-                            # 重新统计
+                            published_count = db.query(PlanVideo).filter(
+                                PlanVideo.plan_id == plan.id,
+                                PlanVideo.status == 'published'
+                            ).count()
+                            failed_count = db.query(PlanVideo).filter(
+                                PlanVideo.plan_id == plan.id,
+                                PlanVideo.status == 'failed'
+                            ).count()
+                            pending_only_count = db.query(PlanVideo).filter(
+                                PlanVideo.plan_id == plan.id,
+                                PlanVideo.status == 'pending'
+                            ).count()
                             processing_count = db.query(PlanVideo).filter(
                                 PlanVideo.plan_id == plan.id,
                                 PlanVideo.status == 'processing'
                             ).count()
-                            pending_count = db.query(PlanVideo).filter(
-                                PlanVideo.plan_id == plan.id,
-                                PlanVideo.status == 'pending'
-                            ).count()
                             
-                            plan.pending_count = pending_count
+                            plan.published_count = published_count
+                            plan.failed_count = failed_count
+                            plan.pending_count = plan.video_count - published_count
                             plan.updated_at = datetime.now()
                             
-                            # 如果所有视频都已处理完成（没有 pending 和 processing），标记计划为 completed
-                            if pending_count == 0 and processing_count == 0:
+                            print(f"[TASK STATUS] 发布计划 {plan.id} 统计: 已发布={published_count}, 处理中={processing_count}, 失败={failed_count}, 待发布={plan.pending_count}, 总数={plan.video_count}")
+                            
+                            if published_count == plan.video_count:
                                 plan.status = 'completed'
-                                print(f"[TASK STATUS] 发布计划 {plan.id} 所有视频已处理完成（包含失败），状态更新为 completed")
+                                print(f"[TASK STATUS] 发布计划 {plan.id} 全部发布成功，状态更新为 completed")
+                            elif pending_only_count == 0 and processing_count == 0:
+                                if published_count > 0 and failed_count > 0:
+                                    plan.status = 'partial_completed'
+                                    print(f"[TASK STATUS] 发布计划 {plan.id} 部分完成（成功{published_count}，失败{failed_count}），状态更新为 partial_completed")
+                                elif failed_count > 0:
+                                    plan.status = 'failed'
+                                    print(f"[TASK STATUS] 发布计划 {plan.id} 全部失败，状态更新为 failed")
                         
-                        db.commit()
-                        print(f"[TASK STATUS] 已更新发布计划视频状态: PlanVideo {plan_video.id} -> failed")
+                        print(f"[TASK STATUS] 已更新 PlanVideo {plan_video.id} 状态为 failed")
                         if douyin_logger:
-                            douyin_logger.info(f"已更新发布计划视频状态: PlanVideo {plan_video.id} -> failed")
-                except Exception as plan_video_error:
-                    # 如果更新 PlanVideo 失败，不影响任务状态更新
-                    print(f"[TASK STATUS] 更新 PlanVideo 状态失败（不影响任务失败标记）: {plan_video_error}")
-                    if douyin_logger:
-                        douyin_logger.warning(f"更新 PlanVideo 状态失败: {plan_video_error}")
+                            douyin_logger.info(f"已更新 PlanVideo {plan_video.id} 状态为 failed")
+            except Exception as plan_video_error:
+                print(f"[TASK STATUS] 更新 PlanVideo 状态失败（不影响任务失败标记）: {plan_video_error}")
+                if douyin_logger:
+                    douyin_logger.warning(f"更新 PlanVideo 状态失败: {plan_video_error}")
             
-            # 清理临时文件（即使失败也要清理）
             try:
                 if 'account_file' in locals() and os.path.exists(account_file):
                     os.remove(account_file)
@@ -1448,4 +1521,3 @@ def save_message_to_db(account_id: int, user_name: str, text: str, is_me: bool, 
         if douyin_logger:
             douyin_logger.error(f"Failed to save message to database: {e}")
         return False
-

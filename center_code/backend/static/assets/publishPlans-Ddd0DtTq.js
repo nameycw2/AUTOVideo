@@ -1,0 +1,1 @@
+import{H as e}from"./index-BhYzGwy6.js";const n=s=>e.get("/publish-plans",{params:s}),a=s=>e.post("/publish-plans",s),u=(s,t)=>e.put(`/publish-plans/${s}`,t),p=s=>e.delete(`/publish-plans/${s}`),i=s=>e.post(`/publish-plans/${s}/execute`),r=(s,t)=>e.post(`/publish-plans/${s}/videos`,t);export{r as a,a as c,p as d,i as e,n as g,u};

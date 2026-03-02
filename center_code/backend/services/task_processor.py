@@ -4,8 +4,9 @@
 """
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 
 from models import VideoTask, ChatTask, ListenTask, PublishPlan, PlanVideo
 from db import get_db
@@ -24,9 +25,9 @@ class TaskProcessor:
         初始化任务处理器
         
         Args:
-            poll_interval: 定时任务检查间隔（秒），默认 60 秒（1分钟）
+            poll_interval: 定时任务检查间隔（秒），默认 5 秒
         """
-        self.poll_interval = poll_interval or 60  # 默认1分钟检查一次定时任务
+        self.poll_interval = poll_interval or 5  # 默认5秒检查一次
         self.is_running = False
         self.thread = None
     
@@ -63,15 +64,17 @@ class TaskProcessor:
         with get_db() as db:
             now = datetime.now()
             
-            # 1. 检查到期的发布计划
-            publish_plans = db.query(PublishPlan).filter(
-                PublishPlan.status == 'pending',
-                PublishPlan.publish_time <= now,
-                PublishPlan.publish_time.isnot(None)
-            ).limit(10).all()  # 限制每次最多处理10个，避免阻塞
-            
-            if publish_plans:
-                print(f"[定时检查] 发现 {len(publish_plans)} 个到期的发布计划，触发处理")
+            # 1. 检查是否存在到点的计划视频（不再依赖计划时间）
+            due_plan_video = db.query(PlanVideo.id).join(
+                PublishPlan, PlanVideo.plan_id == PublishPlan.id
+            ).filter(
+                PublishPlan.status.in_(['pending', 'publishing']),
+                PlanVideo.status == 'pending',
+                or_(PlanVideo.publish_time.is_(None), PlanVideo.publish_time <= now)
+            ).first()
+
+            if due_plan_video:
+                print("[定时检查] 检测到到点的计划视频，触发处理")
                 # 触发完整处理（在后台线程中）
                 def trigger_processing():
                     try:
@@ -187,14 +190,10 @@ class TaskProcessor:
     def _process_pending_tasks(self):
         """处理待处理的任务"""
         with get_db() as db:
-            # 1. 处理发布计划
-            # 查找所有状态为pending且publish_time已到的发布计划
-            # 排除已完成、失败和正在处理中的计划，避免重复处理
             now = datetime.now()
+            
             publish_plans = db.query(PublishPlan).filter(
-                PublishPlan.status == 'pending',
-                PublishPlan.publish_time <= now,
-                PublishPlan.publish_time.isnot(None)  # 确保有发布时间
+                PublishPlan.status == 'pending'
             ).all()
             
             if publish_plans:
@@ -202,32 +201,25 @@ class TaskProcessor:
                 
                 for plan in publish_plans:
                     try:
-                        # 双重检查：确保计划状态仍然是pending（防止并发处理）
                         db.refresh(plan)
                         if plan.status != 'pending':
-                            print(f"[TASK POLL] 发布计划 {plan.id} 状态已变更为 {plan.status}，跳过处理（可能已被其他进程处理）")
+                            print(f"[TASK POLL] 发布计划 {plan.id} 状态已变更为 {plan.status}，跳过处理")
                             continue
                         
                         print(f"[TASK POLL] 处理发布计划: {plan.plan_name} (ID: {plan.id})")
-                        # 更新计划状态为publishing（防止重复处理）
-                        plan.status = 'publishing'
-                        plan.updated_at = now
-                        db.commit()
                         
-                        # 获取计划关联的视频（只处理状态为pending的视频，避免重复发布）
                         plan_videos = db.query(PlanVideo).filter(
                             PlanVideo.plan_id == plan.id,
-                            PlanVideo.status == 'pending'  # 只处理未发布的视频
+                            PlanVideo.status == 'pending'
                         ).all()
                         
                         if not plan_videos:
-                            print(f"[TASK POLL] 发布计划 {plan.id} 没有关联的视频，跳过")
+                            print(f"[TASK POLL] 发布计划 {plan.id} 没有待发布的视频，标记为已完成")
                             plan.status = 'completed'
                             plan.updated_at = now
                             db.commit()
                             continue
                         
-                        # 获取该平台下的所有已登录账号
                         from models import Account
                         accounts = db.query(Account).filter(
                             Account.platform == plan.platform,
@@ -235,31 +227,41 @@ class TaskProcessor:
                         ).all()
                         
                         if not accounts:
-                            print(f"[TASK POLL] 发布计划 {plan.id} 的平台 {plan.platform} 没有已登录的账号，跳过")
+                            print(f"[TASK POLL] 发布计划 {plan.id} 的平台 {plan.platform} 没有已登录的账号，标记为失败")
+                            for video in plan_videos:
+                                video.status = 'failed'
                             plan.status = 'failed'
+                            plan.failed_count = len(plan_videos)
+                            plan.pending_count = 0
                             plan.updated_at = now
                             db.commit()
                             continue
                         
-                        # 为每个视频分配到账号并创建视频任务
                         from pathlib import Path
                         import os
                         
                         for i, video in enumerate(plan_videos):
-                            # 检查视频文件是否存在
+                            if video.publish_time and video.publish_time > now:
+                                print(f"[TASK POLL] PlanVideo {video.id} 发布时间未到 ({video.publish_time})，跳过")
+                                continue
+                            
+                            existing_task = db.query(VideoTask).filter(
+                                VideoTask.plan_video_id == video.id
+                            ).first()
+                            
+                            if existing_task:
+                                print(f"[TASK POLL] PlanVideo {video.id} 已有任务 {existing_task.id}(status={existing_task.status})，跳过")
+                                continue
+                            
                             video_path = video.video_url
                             file_exists = False
                             
-                            # 尝试解析视频路径
                             if video_path.startswith('http://') or video_path.startswith('https://'):
-                                # HTTP URL，无法预先检查存在性，假设存在
                                 file_exists = True
                             else:
-                                # 本地文件路径
                                 if video_path.startswith('file://'):
                                     video_path = video_path[7:]
                                 elif video_path.startswith('/'):
-                                    # 相对路径，转换为绝对路径
                                     backend_dir = Path(__file__).parent.parent
                                     if video_path.startswith('/uploads/'):
                                         uploads_path = backend_dir.parent / 'uploads'
@@ -267,110 +269,254 @@ class TaskProcessor:
                                         video_path = str(full_path)
                                     else:
                                         video_path = str(backend_dir / video_path.lstrip('/'))
-                                
-                                # 检查文件是否存在
                                 file_exists = os.path.exists(video_path)
                             
                             if file_exists:
-                                # 文件存在，创建视频任务
-                                # 简单的轮询分配策略
                                 account = accounts[i % len(accounts)]
                                 
-                                # 检查是否已经存在相同的任务（相同的video_url和account_id，且状态不是completed）
-                                existing_task = db.query(VideoTask).filter(
-                                    VideoTask.video_url == video.video_url,
-                                    VideoTask.account_id == account.id,
-                                    VideoTask.status != 'completed'
-                                ).first()
-                                
-                                if existing_task:
-                                    print(f"[TASK POLL] 视频任务已存在（任务ID: {existing_task.id}, 状态: {existing_task.status}），处理策略中: {video.video_url}")
-                                    
-                                    # 如果任务已经在队列中待处理或正在处理中，视频标记为 processing，等待任务执行即可
-                                    if existing_task.status in ['pending', 'uploading']:
-                                        video.status = 'processing'
-                                        continue
-                                    
-                                    # 如果任务之前失败了，则重置该任务为 pending，允许重新发布
-                                    if existing_task.status == 'failed':
-                                        print(f"[TASK POLL] 任务 {existing_task.id} 之前失败，本次将重置为 pending 重新发布")
-                                        existing_task.status = 'pending'
-                                        existing_task.started_at = None
-                                        existing_task.completed_at = None
-                                        existing_task.error_message = None
-                                        video.status = 'processing'
-                                        # 不再 continue，后续统计和任务处理会把该任务当作新的待处理任务
-                                        continue
-                                
-                                # 创建视频任务
                                 video_task = VideoTask(
                                     account_id=account.id,
                                     device_id=account.device_id,
                                     video_url=video.video_url,
                                     video_title=video.video_title or f"视频 {i+1}",
                                     thumbnail_url=video.thumbnail_url,
-                                    status='pending'
+                                    status='pending',
+                                    plan_video_id=video.id
                                 )
                                 db.add(video_task)
-                                
-                                # 更新视频状态为 processing（处理中），等待任务完成后更新为 published
+                                db.flush()
                                 video.status = 'processing'
+                                print(f"[TASK POLL] 为 PlanVideo {video.id} 创建 VideoTask，账号: {account.account_name}")
                             else:
-                                # 文件不存在，标记视频状态为failed
-                                print(f"[TASK POLL] 视频文件不存在，跳过: {video.video_url}")
+                                print(f"[TASK POLL] 视频文件不存在，标记为失败: {video.video_url}")
                                 video.status = 'failed'
-                                # 不创建视频任务
                         
-                        # 更新计划统计信息
-                        # 统计成功发布的视频数量
                         published_count = db.query(PlanVideo).filter(
                             PlanVideo.plan_id == plan.id,
                             PlanVideo.status == 'published'
                         ).count()
-                        
-                        # 统计处理中的视频数量
                         processing_count = db.query(PlanVideo).filter(
                             PlanVideo.plan_id == plan.id,
                             PlanVideo.status == 'processing'
                         ).count()
-                        
-                        # 统计失败的视频数量
                         failed_count = db.query(PlanVideo).filter(
                             PlanVideo.plan_id == plan.id,
                             PlanVideo.status == 'failed'
                         ).count()
                         
-                        # 统计待处理的视频数量
-                        pending_count = db.query(PlanVideo).filter(
-                            PlanVideo.plan_id == plan.id,
-                            PlanVideo.status == 'pending'
-                        ).count()
-                        
-                        plan.published_count = published_count
-                        plan.pending_count = pending_count
-                        plan.updated_at = now
-                        
-                        # 只有当所有视频都已处理完成（没有 pending 和 processing 状态）时，才标记计划为 completed
-                        if pending_count == 0 and processing_count == 0:
-                            plan.status = 'completed'
-                            print(f"[TASK POLL] 发布计划 {plan.id} 所有视频已处理完成，状态更新为 completed")
+                        if processing_count > 0 or published_count > 0 or failed_count > 0:
+                            plan.status = 'publishing'
                         else:
-                            # 还有视频在处理中，保持 publishing 状态
-                            print(f"[TASK POLL] 发布计划 {plan.id} 还有视频在处理中（pending: {pending_count}, processing: {processing_count}），保持 publishing 状态")
+                            plan.status = 'pending'
+                        plan.published_count = published_count
+                        plan.pending_count = plan.video_count - published_count
+                        plan.failed_count = failed_count
+                        plan.updated_at = now
                         
                         db.commit()
                         
-                        print(f"[TASK POLL] 发布计划 {plan.id} 已创建 {len(plan_videos)} 个视频任务，统计：已发布={published_count}, 处理中={processing_count}, 失败={failed_count}, 待处理={pending_count}")
-                        # 注意：不在这里立即处理视频任务，避免重复处理
-                        # 视频任务会在 _process_pending_tasks 的最后统一处理
+                        print(f"[TASK POLL] 发布计划 {plan.id} 统计: 已发布={published_count}, 处理中={processing_count}, 失败={failed_count}, 待发布={plan.pending_count}")
                         
                     except Exception as e:
                         print(f"[TASK POLL] 处理发布计划 {plan.id} 错误: {e}")
                         import traceback
                         traceback.print_exc()
-                        plan.status = 'failed'
-                        plan.updated_at = now
+                        try:
+                            plan.status = 'failed'
+                            plan.updated_at = now
+                            db.commit()
+                        except:
+                            pass
+            
+            publishing_plans = db.query(PublishPlan).filter(
+                PublishPlan.status == 'publishing'
+            ).all()
+            
+            for plan in publishing_plans:
+                try:
+                    pending_videos = db.query(PlanVideo).filter(
+                        PlanVideo.plan_id == plan.id,
+                        PlanVideo.status == 'pending'
+                    ).all()
+                    
+                    if not pending_videos:
+                        continue
+                    
+                    print(f"[TASK POLL] 发布计划 {plan.id} 还有 {len(pending_videos)} 个待处理视频")
+                    
+                    from models import Account
+                    accounts = db.query(Account).filter(
+                        Account.platform == plan.platform,
+                        Account.login_status == 'logged_in'
+                    ).all()
+                    
+                    if not accounts:
+                        print(f"[TASK POLL] 发布计划 {plan.id} 没有已登录账号，标记剩余视频为失败")
+                        for video in pending_videos:
+                            video.status = 'failed'
+                        plan.failed_count = db.query(PlanVideo).filter(
+                            PlanVideo.plan_id == plan.id,
+                            PlanVideo.status == 'failed'
+                        ).count()
+                        plan.pending_count = 0
                         db.commit()
+                        continue
+                    
+                    from pathlib import Path
+                    import os
+                    
+                    for i, video in enumerate(pending_videos):
+                        if video.publish_time and video.publish_time > now:
+                            print(f"[TASK POLL] PlanVideo {video.id} 发布时间未到 ({video.publish_time})，跳过")
+                            continue
+                        
+                        existing_task = db.query(VideoTask).filter(
+                            VideoTask.plan_video_id == video.id
+                        ).first()
+                        
+                        if existing_task:
+                            print(f"[TASK POLL] PlanVideo {video.id} 已有任务 {existing_task.id}，跳过")
+                            continue
+                        
+                        video_path = video.video_url
+                        file_exists = False
+                        
+                        if video_path.startswith('http://') or video_path.startswith('https://'):
+                            file_exists = True
+                        else:
+                            if video_path.startswith('file://'):
+                                video_path = video_path[7:]
+                            elif video_path.startswith('/'):
+                                backend_dir = Path(__file__).parent.parent
+                                if video_path.startswith('/uploads/'):
+                                    uploads_path = backend_dir.parent / 'uploads'
+                                    full_path = uploads_path / video_path.lstrip('/uploads/')
+                                    video_path = str(full_path)
+                                else:
+                                    video_path = str(backend_dir / video_path.lstrip('/'))
+                            file_exists = os.path.exists(video_path)
+                        
+                        if file_exists:
+                            account = accounts[i % len(accounts)]
+                            
+                            video_task = VideoTask(
+                                account_id=account.id,
+                                device_id=account.device_id,
+                                video_url=video.video_url,
+                                video_title=video.video_title or f"视频 {i+1}",
+                                thumbnail_url=video.thumbnail_url,
+                                status='pending',
+                                plan_video_id=video.id
+                            )
+                            db.add(video_task)
+                            db.flush()
+                            video.status = 'processing'
+                            print(f"[TASK POLL] 为 PlanVideo {video.id} 创建 VideoTask，账号: {account.account_name}")
+                        else:
+                            print(f"[TASK POLL] 视频文件不存在，标记为失败: {video.video_url}")
+                            video.status = 'failed'
+                    
+                    published_count = db.query(PlanVideo).filter(
+                        PlanVideo.plan_id == plan.id,
+                        PlanVideo.status == 'published'
+                    ).count()
+                    processing_count = db.query(PlanVideo).filter(
+                        PlanVideo.plan_id == plan.id,
+                        PlanVideo.status == 'processing'
+                    ).count()
+                    failed_count = db.query(PlanVideo).filter(
+                        PlanVideo.plan_id == plan.id,
+                        PlanVideo.status == 'failed'
+                    ).count()
+                    
+                    plan.published_count = published_count
+                    plan.pending_count = plan.video_count - published_count
+                    plan.failed_count = failed_count
+                    plan.updated_at = now
+                    
+                    db.commit()
+                    
+                    print(f"[TASK POLL] 发布计划 {plan.id} 统计: 已发布={published_count}, 处理中={processing_count}, 失败={failed_count}, 待发布={plan.pending_count}")
+                    
+                except Exception as e:
+                    print(f"[TASK POLL] 处理 publishing 计划 {plan.id} 错误: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # 1.6 检查超时的视频（每条视频在计划发布时间后45秒未完成则标记失败）
+            TIMEOUT_SECONDS = 45
+            timeout_plans = db.query(PublishPlan).filter(
+                PublishPlan.status.in_(['pending', 'publishing'])
+            ).all()
+            for plan in timeout_plans:
+                try:
+                    candidates = db.query(PlanVideo).filter(
+                        PlanVideo.plan_id == plan.id,
+                        PlanVideo.status.in_(['pending', 'processing'])
+                    ).all()
+
+                    changed = False
+                    for video in candidates:
+                        due_time = video.publish_time or plan.publish_time
+                        if not due_time:
+                            # 无计划时间的不做45秒超时判定（立即发布场景）
+                            continue
+                        if now <= (due_time + timedelta(seconds=TIMEOUT_SECONDS)):
+                            continue
+
+                        video.status = 'failed'
+                        changed = True
+                        print(f"[TASK POLL] PlanVideo {video.id} 超时(>{TIMEOUT_SECONDS}s)，标记为失败")
+
+                        # 同步停止并标记关联上传任务，避免继续回写成功状态
+                        timeout_tasks = db.query(VideoTask).filter(
+                            VideoTask.plan_video_id == video.id,
+                            VideoTask.status.in_(['pending', 'uploading', 'processing'])
+                        ).all()
+                        for task in timeout_tasks:
+                            task.status = 'failed'
+                            task.error_message = f"计划发布时间后{TIMEOUT_SECONDS}秒内未发布完成，系统已停止并标记失败"
+                            task.completed_at = now
+                            print(f"[TASK POLL] VideoTask {task.id} 因超时标记为 failed")
+
+                    if not changed:
+                        continue
+                    
+                    published_count = db.query(PlanVideo).filter(
+                        PlanVideo.plan_id == plan.id,
+                        PlanVideo.status == 'published'
+                    ).count()
+                    failed_count = db.query(PlanVideo).filter(
+                        PlanVideo.plan_id == plan.id,
+                        PlanVideo.status == 'failed'
+                    ).count()
+                    pending_only_count = db.query(PlanVideo).filter(
+                        PlanVideo.plan_id == plan.id,
+                        PlanVideo.status == 'pending'
+                    ).count()
+                    processing_count = db.query(PlanVideo).filter(
+                        PlanVideo.plan_id == plan.id,
+                        PlanVideo.status == 'processing'
+                    ).count()
+                    
+                    plan.published_count = published_count
+                    plan.failed_count = failed_count
+                    plan.pending_count = plan.video_count - published_count
+                    
+                    if pending_only_count == 0 and processing_count == 0:
+                        if published_count > 0 and failed_count > 0:
+                            plan.status = 'partial_completed'
+                            print(f"[TASK POLL] 发布计划 {plan.id} 部分完成")
+                        elif failed_count > 0:
+                            plan.status = 'failed'
+                            print(f"[TASK POLL] 发布计划 {plan.id} 全部失败")
+                    
+                    db.commit()
+                    
+                except Exception as e:
+                    print(f"[TASK POLL] 检查超时视频错误: {e}")
+                    import traceback
+                    traceback.print_exc()
             
             # 2. 处理定时发布任务（publish_date 已到的任务）
             now = datetime.now()
@@ -449,4 +595,3 @@ def get_task_processor() -> TaskProcessor:
     if _task_processor is None:
         _task_processor = TaskProcessor()
     return _task_processor
-

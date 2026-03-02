@@ -55,6 +55,12 @@
         <el-icon><Edit /></el-icon>
         <template #title>AI视频剪辑</template>
       </el-menu-item>
+      
+      <el-menu-item index="/ai-video-generator">
+        <el-icon><MagicStick /></el-icon>
+        <template #title>AI视频生成</template>
+      </el-menu-item>
+      
       <el-menu-item v-if="showUserManagement" index="/user-management">
         <el-icon><User /></el-icon>
         <template #title>用户管理</template>

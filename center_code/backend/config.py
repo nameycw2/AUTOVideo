@@ -101,6 +101,9 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
+# 调试日志
+print(f"🔍 DEEPSEEK_API_KEY 已加载: {'***' + DEEPSEEK_API_KEY[-4:] if DEEPSEEK_API_KEY and len(DEEPSEEK_API_KEY) > 4 else 'empty'}")
+
 # 如果缺少必要的AI配置，给出提示
 if not DEEPSEEK_API_KEY:
     print("\n⚠️  警告：DeepSeek API密钥未配置！")

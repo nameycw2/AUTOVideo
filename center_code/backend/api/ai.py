@@ -176,7 +176,12 @@ def ai_tts_synthesize():
         pitch = data.get("pitch", 5)
         volume = data.get("volume", 5)
         persist = data.get("persist") is True
-        use_timestamps = data.get("use_timestamps", False)  # 是否使用时间戳模式（按句切割）
+        # 默认启用时间戳模式：优先用 TTS 时间轴生成字幕，减少 ASR 依赖
+        use_timestamps = data.get("use_timestamps", True)
+        if isinstance(use_timestamps, str):
+            use_timestamps = use_timestamps.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            use_timestamps = bool(use_timestamps)
         theme = (data.get("theme") or "").strip()  # 主题，用于命名
         keywords = (data.get("keywords") or "").strip()  # 关键字，用于命名
 

@@ -83,6 +83,12 @@ const routes = [
         meta: { requiresAuth: true, title: 'Video Editor' }
       },
       {
+        path: 'ai-video-generator',
+        name: 'AIVideoGenerator',
+        component: () => import('../views/AIVideoGenerator.vue'),
+        meta: { requiresAuth: true, title: 'AI Video Generator' }
+      },
+      {
         path: 'profile',
         name: 'Profile',
         component: () => import('../views/Profile.vue'),

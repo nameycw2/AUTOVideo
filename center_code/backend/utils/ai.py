@@ -3,7 +3,10 @@ AI 文案生成工具（DeepSeek）
 """
 import json
 import os
+import logging
 from typing import Any, Optional, Dict
+
+logger = logging.getLogger(__name__)
 
 # 导入配置
 import sys
@@ -15,10 +18,14 @@ def _get_openai_client():
     try:
         from openai import OpenAI, APIError
     except Exception as e:
+        logger.error(f"未安装 openai 依赖: {e}")
         raise RuntimeError("未安装 openai 依赖，请先 pip install openai") from e
 
     api_key = (DEEPSEEK_API_KEY or os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+    logger.info(f"获取 API Key: {'***' + api_key[-4:] if api_key and len(api_key) > 4 else 'empty'}")
+    
     if not api_key:
+        logger.error("缺少 DEEPSEEK_API_KEY 环境变量")
         raise RuntimeError("缺少 DEEPSEEK_API_KEY 环境变量")
 
     base_url = (DEEPSEEK_BASE_URL or os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").strip()

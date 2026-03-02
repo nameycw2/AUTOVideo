@@ -38,7 +38,7 @@ export const useAuthStore = defineStore('auth', () => {
     isCheckingLogin.value = true
     try {
       const res = await api.auth.checkLogin()
-      // 兼容响应被包一层的情况（如代理返回 { data: { code, message, data } }）
+      // 鍏煎鍝嶅簲琚寘涓€灞傜殑鎯呭喌锛堝浠ｇ悊杩斿洖 { data: { code, message, data } }锛?
       const body = (res && res.data && typeof res.data === 'object' && (res.data.code !== undefined || (res.data.data && res.data.data.logged_in !== undefined)))
         ? res.data
         : res
@@ -74,7 +74,7 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const res = await api.auth.login(payload)
       const data = res?.data
-      const tokenValue = (data && data.token) || res?.token
+      const tokenValue = (data && data.token) || res?.token || res?.data?.data?.token
       if (tokenValue && (res?.code === 200 || res?.code === 201)) {
         setToken(String(tokenValue))
         username.value = (data && data.username) ?? payload?.username ?? payload?.email ?? ''
@@ -84,9 +84,9 @@ export const useAuthStore = defineStore('auth', () => {
         parentId.value = data && data.parent_id != null ? data.parent_id : null
         return { success: true }
       }
-      return { success: false, message: res?.message || '登录失败' }
+      return { success: false, message: res?.message || '鐧诲綍澶辫触' }
     } catch (error) {
-      const msg = error?.message || error?.data?.message || '登录失败'
+      const msg = error?.message || error?.data?.message || '鐧诲綍澶辫触'
       return { success: false, message: msg }
     }
   }

@@ -40,11 +40,15 @@ def _extract_cos_key_from_url(url: str) -> str:
         return None
     
     try:
+        from urllib.parse import unquote
         from config import COS_DOMAIN, COS_SCHEME, COS_BUCKET, COS_REGION
         
         # 如果是预签名URL，先提取基础URL部分（去掉查询参数）
         if '?' in url:
             url = url.split('?')[0]
+        
+        # URL解码（COS中存储的是未编码的key）
+        url = unquote(url)
         
         # 方法1：使用自定义域名
         if COS_DOMAIN and COS_DOMAIN in url:
@@ -58,7 +62,15 @@ def _extract_cos_key_from_url(url: str) -> str:
             cos_key = url.replace(prefix, '').lstrip('/')
             return cos_key
         
-        # 方法3：尝试从URL路径中提取（如果URL包含video/等路径）
+        # 方法3：尝试从任意COS域名提取（兼容不同存储桶）
+        # 匹配格式：https://任意bucket.cos.区域.myqcloud.com/key
+        import re
+        cos_pattern = r'https?://([a-zA-Z0-9-]+)\.cos\.([a-z0-9-]+)\.myqcloud\.com/(.+)'
+        match = re.match(cos_pattern, url)
+        if match:
+            return match.group(3).lstrip('/')
+        
+        # 方法4：尝试从URL路径中提取（如果URL包含video/等路径）
         # 假设URL格式为：.../video/2024/01/15/filename.mp4
         if '/video/' in url:
             parts = url.split('/video/')
@@ -115,14 +127,13 @@ def _refresh_cos_url_if_needed(url: str) -> str:
 
 
 @video_library_bp.route('', methods=['GET'])
-@login_required
 def get_videos():
     """
     获取视频列表接口
     
     请求方法: GET
     路径: /api/video-library
-    认证: 需要登录
+    认证: 可选，未登录时返回公共视频
     
     查询参数:
         search (string, 可选): 搜索关键词，模糊匹配视频名称
@@ -160,12 +171,12 @@ def get_videos():
     说明:
         - 支持按视频名称搜索和平台筛选
         - 结果按创建时间倒序排列
+        - 未登录时返回user_id为None的公共视频
+        - 登录后返回当前用户的视频和公共视频
     """
     try:
-        # 获取当前用户ID，确保数据隔离
+        # 获取当前用户ID
         user_id = get_current_user_id()
-        if not user_id:
-            return response_error('请先登录', 401)
         
         search = request.args.get('search')
         platform = request.args.get('platform')
@@ -173,8 +184,15 @@ def get_videos():
         offset = request.args.get('offset', type=int, default=0)
         
         with get_db() as db:
-            # 只查询当前用户的视频
-            query = db.query(VideoLibrary).filter(VideoLibrary.user_id == user_id)
+            # 构建查询条件
+            if user_id:
+                # 登录用户：返回自己的视频和公共视频（user_id为None）
+                query = db.query(VideoLibrary).filter(
+                    (VideoLibrary.user_id == user_id) | (VideoLibrary.user_id == None)
+                )
+            else:
+                # 未登录用户：只返回公共视频（user_id为None）
+                query = db.query(VideoLibrary).filter(VideoLibrary.user_id == None)
             
             if search:
                 query = query.filter(

@@ -5,6 +5,7 @@ import re
 import random
 import uuid
 import smtplib
+import ssl
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 
@@ -48,14 +49,17 @@ def _send_verification_email(to_email, code):
     message['From'] = smtp_from
     message['To'] = to_email
 
+    ssl_context = ssl.create_default_context()
     if smtp_port == 465 or use_ssl:
-        server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10)
+        server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10, context=ssl_context)
     else:
         server = smtplib.SMTP(smtp_host, smtp_port, timeout=10)
 
     try:
         if use_tls and smtp_port != 465 and not use_ssl:
-            server.starttls()
+            server.ehlo()
+            server.starttls(context=ssl_context)
+            server.ehlo()
         server.login(smtp_user, smtp_password)
         server.sendmail(smtp_from, [to_email], message.as_string())
     finally:

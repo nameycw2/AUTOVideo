@@ -123,7 +123,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../api'
 import * as publishPlanApi from '../api/publishPlans'
@@ -148,6 +148,7 @@ const planPagination = ref({
   size: 10,
   total: 0
 })
+const refreshTimer = ref(null)
 
 // 格式化日期时间
 const formatDateTime = (datetime) => {
@@ -177,7 +178,9 @@ const getStatusType = (status) => {
   const statusMap = {
     'pending': 'warning',
     'processing': 'info',
+    'uploading': 'info',
     'completed': 'success',
+    'published': 'success',
     'failed': 'danger'
   }
   return statusMap[status] || 'info'
@@ -188,7 +191,9 @@ const getStatusText = (status) => {
   const statusMap = {
     'pending': '待发布',
     'processing': '发布中',
+    'uploading': '发布中',
     'completed': '已发布',
+    'published': '已发布',
     'failed': '发布失败'
   }
   return statusMap[status] || status
@@ -249,11 +254,34 @@ const loadPlanHistory = async () => {
 
 // 处理标签页切换
 const handleTabChange = (tab) => {
+  restartAutoRefresh(tab)
   if (tab === 'instant' && instantHistory.value.length === 0) {
     loadInstantHistory()
   } else if (tab === 'plan' && planHistory.value.length === 0) {
     loadPlanHistory()
   }
+}
+
+const startAutoRefresh = (tab) => {
+  stopAutoRefresh()
+  refreshTimer.value = setInterval(() => {
+    if (tab === 'plan') {
+      loadPlanHistory()
+    } else {
+      loadInstantHistory()
+    }
+  }, 5000)
+}
+
+const stopAutoRefresh = () => {
+  if (refreshTimer.value) {
+    clearInterval(refreshTimer.value)
+    refreshTimer.value = null
+  }
+}
+
+const restartAutoRefresh = (tab = activeTab.value) => {
+  startAutoRefresh(tab)
 }
 
 // 查看详情
@@ -284,6 +312,11 @@ const handleDeleteTask = async (row) => {
 // 初始化
 onMounted(() => {
   loadInstantHistory()
+  restartAutoRefresh('instant')
+})
+
+onUnmounted(() => {
+  stopAutoRefresh()
 })
 </script>
 

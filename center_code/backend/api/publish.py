@@ -15,6 +15,16 @@ from models import VideoTask, Account, VideoLibrary
 from db import get_db
 from services.task_executor import execute_video_upload
 
+try:
+    from blueprints.video_library import _refresh_cos_url_if_needed, _extract_cos_key_from_url
+    COS_REFRESH_AVAILABLE = True
+except ImportError:
+    COS_REFRESH_AVAILABLE = False
+    def _refresh_cos_url_if_needed(url):
+        return url
+    def _extract_cos_key_from_url(url):
+        return None
+
 publish_bp = Blueprint('publish', __name__, url_prefix='/api/publish')
 
 
@@ -281,6 +291,18 @@ def submit_publish():
             # 确保最终有video_url
             if not final_video_url:
                 return response_error('Video URL is required', 400)
+            
+            # 刷新COS URL（如果是COS预签名URL，可能已过期）
+            # 这一步非常重要：确保视频URL在任务执行时仍然有效
+            print(f"[Publish] 原始视频URL: {final_video_url}")
+            refreshed_video_url = _refresh_cos_url_if_needed(final_video_url)
+            if refreshed_video_url != final_video_url:
+                print(f"[Publish] COS URL已刷新: {refreshed_video_url}")
+                final_video_url = refreshed_video_url
+            
+            # 同样刷新缩略图URL
+            if final_thumbnail_url:
+                final_thumbnail_url = _refresh_cos_url_if_needed(final_thumbnail_url)
             
             # 2. 验证所有账号是否存在，并获取账号信息
             accounts = []

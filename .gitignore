@@ -10,3 +10,6 @@ __pycache__/
 node_modules/
 dist/
 build/
+
+center_code/backend/utils/money_printer/tasks/
+center_code/backend/utils/money_printer/tasks/**

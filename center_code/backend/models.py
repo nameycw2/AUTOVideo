@@ -1,5 +1,5 @@
 """
-鏁版嵁妯″瀷瀹氫箟
+数据模型定义
 """
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Index, Text, Float, REAL, Boolean
 from sqlalchemy.orm import declarative_base
@@ -8,14 +8,14 @@ from werkzeug.security import generate_password_hash, check_password_hash
 Base = declarative_base()
 
 
-# 鐢ㄦ埛瑙掕壊锛歴uper_admin=瓒呯骇绠＄悊鍛? parent=姣嶈处鍙? child=瀛愯处鍙?
+# 用户角色：super_admin=超级管理员, parent=母账号, child=子账号
 USER_ROLE_SUPER_ADMIN = 'super_admin'
 USER_ROLE_PARENT = 'parent'
 USER_ROLE_CHILD = 'child'
 
 
 class User(Base):
-    """鐢ㄦ埛琛?""
+    """用户表"""
     __tablename__ = 'users'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -24,22 +24,22 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     avatar_url = Column(String(500))
     is_verified = Column(Boolean, default=False)
-    # 瑙掕壊锛歴uper_admin / parent / child
+    # 角色：super_admin / parent / child
     role = Column(String(32), default=USER_ROLE_CHILD, nullable=False, index=True)
-    # 瀛愯处鍙峰綊灞炵殑姣嶈处鍙?ID锛屼粎 role=child 鏃舵湁鍊?
+    # 子账号归属的母账号 ID，仅 role=child 时有值
     parent_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
-    # 姣嶈处鍙蜂笅灞炲瓙璐﹀彿鏁伴噺涓婇檺锛屼粎 role=parent 鏃舵湁鏁堬紱NULL 琛ㄧず涓嶉檺鍒?
+    # 母账号下属子账号数量上限，仅 role=parent 时有效；NULL 表示不限制
     max_children = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now())
     updated_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now(),
                        onupdate=lambda: __import__('datetime').datetime.now())
     
     def set_password(self, password):
-        """璁剧疆瀵嗙爜锛堝姞瀵嗭級"""
+        """设置密码（加密）"""
         self.password_hash = generate_password_hash(password)
     
     def check_password(self, password):
-        """楠岃瘉瀵嗙爜"""
+        """验证密码"""
         return check_password_hash(self.password_hash, password)
 
 
@@ -56,7 +56,7 @@ class EmailVerification(Base):
 
 
 class Device(Base):
-    """璁惧琛?""
+    """设备表"""
     __tablename__ = 'devices'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -71,7 +71,7 @@ class Device(Base):
 
 
 class Account(Base):
-    """璐﹀彿琛?""
+    """账号表"""
     __tablename__ = 'accounts'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -79,7 +79,7 @@ class Account(Base):
     account_name = Column(String(255), nullable=False, index=True)
     platform = Column(String(50), default='douyin')
     cookie_file_path = Column(String(500))
-    cookies = Column(Text)  # JSON瀛楃涓?
+    cookies = Column(Text)  # JSON字符串
     login_status = Column(String(50), default='logged_out')
     last_login_time = Column(DateTime)
     created_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now())
@@ -87,14 +87,29 @@ class Account(Base):
                        onupdate=lambda: __import__('datetime').datetime.now())
 
 
-    plan_video_id = Column(Integer, ForeignKey('plan_videos.id'), nullable=True)
+class VideoTask(Base):
+    """视频任务表"""
+    __tablename__ = 'video_tasks'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
+    device_id = Column(Integer, ForeignKey('devices.id'), nullable=False)
+    video_url = Column(String(1000), nullable=False)
+    video_title = Column(String(500))
+    video_description = Column(Text)  # 正文/描述，与 video_title、video_tags 一起用于发布
+    video_tags = Column(String(500))
+    publish_date = Column(DateTime)
+    thumbnail_url = Column(String(1000))
+    status = Column(String(50), default='pending')
+    progress = Column(Integer, default=0)
+    error_message = Column(Text)
     created_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now())
     started_at = Column(DateTime)
     completed_at = Column(DateTime)
 
 
 class ChatTask(Base):
-    """瀵硅瘽浠诲姟琛?""
+    """对话任务表"""
     __tablename__ = 'chat_tasks'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -110,7 +125,7 @@ class ChatTask(Base):
 
 
 class ListenTask(Base):
-    """鐩戝惉浠诲姟琛?""
+    """监听任务表"""
     __tablename__ = 'listen_tasks'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -125,7 +140,7 @@ class ListenTask(Base):
 
 
 class Message(Base):
-    """娑堟伅琛?""
+    """消息表"""
     __tablename__ = 'messages'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -139,7 +154,7 @@ class Message(Base):
 
 
 class PublishPlan(Base):
-    """鍙戝竷璁″垝琛?""
+    """发布计划表"""
     __tablename__ = 'publish_plans'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -161,7 +176,7 @@ class PublishPlan(Base):
 
 
 class PlanVideo(Base):
-    """鍙戝竷璁″垝鍏宠仈鐨勮棰戣〃"""
+    """发布计划关联的视频表"""
     __tablename__ = 'plan_videos'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -177,7 +192,7 @@ class PlanVideo(Base):
 
 
 class Merchant(Base):
-    """鍟嗗琛?""
+    """商家表"""
     __tablename__ = 'merchants'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -193,18 +208,18 @@ class Merchant(Base):
 
 
 class VideoLibrary(Base):
-    """浜戣棰戝簱琛?""
+    """云视频库表"""
     __tablename__ = 'video_library'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)  # 鐢ㄦ埛ID锛岀敤浜庢暟鎹殧绂?
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)  # 用户ID，用于数据隔离
     video_name = Column(String(255), nullable=False)
     video_url = Column(String(1000), nullable=False)
     thumbnail_url = Column(String(1000))
-    video_size = Column(Integer)  # 鏂囦欢澶у皬锛堝瓧鑺傦級
-    duration = Column(Integer)  # 瑙嗛鏃堕暱锛堢锛?
-    platform = Column(String(50))  # 鏉ユ簮骞冲彴
-    tags = Column(String(500))  # 鏍囩锛岄€楀彿鍒嗛殧
+    video_size = Column(Integer)  # 文件大小（字节）
+    duration = Column(Integer)  # 视频时长（秒）
+    platform = Column(String(50))  # 来源平台
+    tags = Column(String(500))  # 标签，逗号分隔
     description = Column(Text)
     upload_time = Column(DateTime, default=lambda: __import__('datetime').datetime.now())
     created_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now())
@@ -213,75 +228,75 @@ class VideoLibrary(Base):
 
 
 class AccountStats(Base):
-    """璐﹀彿缁熻鏁版嵁琛紙鐢ㄤ簬鏁版嵁涓績锛?""
+    """账号统计数据表（用于数据中心）"""
     __tablename__ = 'account_stats'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
-    stat_date = Column(DateTime, nullable=False)  # 缁熻鏃ユ湡
+    stat_date = Column(DateTime, nullable=False)  # 统计日期
     platform = Column(String(50), default='douyin')
-    followers = Column(Integer, default=0)  # 绮変笣鏁?
-    playbacks = Column(Integer, default=0)  # 鎾斁閲?
-    likes = Column(Integer, default=0)  # 鐐硅禐鏁?
-    comments = Column(Integer, default=0)  # 璇勮鏁?
-    shares = Column(Integer, default=0)  # 鍒嗕韩鏁?
-    published_videos = Column(Integer, default=0)  # 鍙戝竷瑙嗛鏁?
+    followers = Column(Integer, default=0)  # 粉丝数
+    playbacks = Column(Integer, default=0)  # 播放量
+    likes = Column(Integer, default=0)  # 点赞数
+    comments = Column(Integer, default=0)  # 评论数
+    shares = Column(Integer, default=0)  # 分享数
+    published_videos = Column(Integer, default=0)  # 发布视频数
     created_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now())
 
 
 class Material(Base):
-    """绱犳潗琛紙瑙嗛/闊抽绱犳潗锛?""
+    """素材表（视频/音频素材）"""
     __tablename__ = 'materials'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(255), nullable=False)  # 鏂囦欢鍚?
+    name = Column(String(255), nullable=False)  # 文件名
     status = Column(String(50), default='ready')  # ready/processing/failed
-    path = Column(String(500), nullable=True)  # 褰撳墠鍙敤鐨勬枃浠惰矾寰勶紙鐩稿 BASE_DIR锛?
-    original_path = Column(String(500), nullable=True)  # 浠呭綋鍙戠敓杞爜鏃朵繚鐣欙紙鏂规C锛?
-    meta_json = Column(Text, nullable=True)  # ffprobe 缁撴灉鎽樿锛屼究浜庢帓鏌?灞曠ず
+    path = Column(String(500), nullable=True)  # 当前可用的文件路径（相对 BASE_DIR）
+    original_path = Column(String(500), nullable=True)  # 仅当发生转码时保留（方案C）
+    meta_json = Column(Text, nullable=True)  # ffprobe 结果摘要，便于排查/展示
     type = Column(String(50), nullable=False)  # video/audio
-    duration = Column(REAL)  # 鏃堕暱锛堢锛夛紝浣跨敤 REAL 鏀寔灏忔暟
-    width = Column(Integer)  # 瀹斤紙瑙嗛锛?
-    height = Column(Integer)  # 楂橈紙瑙嗛锛?
-    size = Column(Integer)  # 鏂囦欢澶у皬锛堝瓧鑺傦級
+    duration = Column(REAL)  # 时长（秒），使用 REAL 支持小数
+    width = Column(Integer)  # 宽（视频）
+    height = Column(Integer)  # 高（视频）
+    size = Column(Integer)  # 文件大小（字节）
     created_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now())
     updated_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now(),
                        onupdate=lambda: __import__('datetime').datetime.now())
 
 
 class VideoEditTask(Base):
-    """瑙嗛鍓緫浠诲姟琛?""
+    """视频剪辑任务表"""
     __tablename__ = 'video_edit_tasks'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)  # 鐢ㄦ埛ID锛岀敤浜庢暟鎹殧绂?
-    video_ids = Column(Text, nullable=False)  # 瑙嗛ID鍒楄〃锛岄€楀彿鍒嗛殧
-    voice_id = Column(Integer, nullable=True)  # 閰嶉煶闊抽ID
-    bgm_id = Column(Integer, nullable=True)  # BGM闊抽ID
-    speed = Column(Float, default=1.0)  # 鎾斁閫熷害锛?.0=姝ｅ父閫熷害锛?
-    subtitle_path = Column(String(1000), nullable=True)  # 瀛楀箷鏂囦欢璺緞
-    filter_type = Column(String(50), nullable=True)  # 婊ら暅绫诲瀷锛坴intage/noir/cyberpunk绛夛級
-    filter_intensity = Column(Float, default=1.0)  # 婊ら暅寮哄害锛?.0-1.0锛?
-    output_path = Column(String(1000), nullable=True)  # 杈撳嚭鏂囦欢璺緞锛堢浉瀵硅矾寰勶級
-    output_filename = Column(String(255), nullable=True)  # 杈撳嚭鏂囦欢鍚?
-    preview_url = Column(String(1000), nullable=True)  # 棰勮URL
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)  # 用户ID，用于数据隔离
+    video_ids = Column(Text, nullable=False)  # 视频ID列表，逗号分隔
+    voice_id = Column(Integer, nullable=True)  # 配音音频ID
+    bgm_id = Column(Integer, nullable=True)  # BGM音频ID
+    speed = Column(Float, default=1.0)  # 播放速度（1.0=正常速度）
+    subtitle_path = Column(String(1000), nullable=True)  # 字幕文件路径
+    filter_type = Column(String(50), nullable=True)  # 滤镜类型（vintage/noir/cyberpunk等）
+    filter_intensity = Column(Float, default=1.0)  # 滤镜强度（0.0-1.0）
+    output_path = Column(String(1000), nullable=True)  # 输出文件路径（相对路径）
+    output_filename = Column(String(255), nullable=True)  # 输出文件名
+    preview_url = Column(String(1000), nullable=True)  # 预览URL
     status = Column(String(50), default='pending')  # pending/running/success/fail
-    progress = Column(Integer, default=0)  # 杩涘害锛?-100锛?
-    error_message = Column(Text, nullable=True)  # 閿欒淇℃伅
+    progress = Column(Integer, default=0)  # 进度（0-100）
+    error_message = Column(Text, nullable=True)  # 错误信息
     created_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now())
     updated_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now(),
                        onupdate=lambda: __import__('datetime').datetime.now())
 
 
 class MaterialTranscodeTask(Base):
-    """绱犳潗杞爜浠诲姟琛紙DB 闃熷垪锛?""
+    """素材转码任务表（DB 队列）"""
     __tablename__ = 'material_transcode_tasks'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     material_id = Column(Integer, ForeignKey('materials.id'), nullable=False, index=True)
 
-    input_path = Column(String(500), nullable=False)  # 鍘熷鏂囦欢鐩稿璺緞
-    output_path = Column(String(500), nullable=False)  # 杞爜浜х墿鐩稿璺緞
+    input_path = Column(String(500), nullable=False)  # 原始文件相对路径
+    output_path = Column(String(500), nullable=False)  # 转码产物相对路径
     kind = Column(String(50), nullable=False)  # video/audio
 
     status = Column(String(50), default='pending')  # pending/running/success/fail
@@ -302,7 +317,7 @@ class MaterialTranscodeTask(Base):
     )
 
 
-# 鍒涘缓绱㈠紩
+# 创建索引
 Index('idx_messages_account_id', Message.account_id)
 Index('idx_messages_timestamp', Message.timestamp)
 Index('idx_messages_user_name', Message.user_name)
@@ -311,8 +326,8 @@ Index('idx_publish_plans_platform', PublishPlan.platform)
 Index('idx_account_stats_account_date', AccountStats.account_id, AccountStats.stat_date)
 Index('idx_materials_type_time', Material.type, Material.created_at)
 Index('idx_materials_status_time', Material.status, Material.updated_at)
-# 娉ㄦ剰锛歱ath 瀛楁鐨勫敮涓€鎬х敱搴旂敤灞備繚璇侊紝鍥犱负 MySQL 瀵归暱瀛楁鐨勫敮涓€绱㈠紩鏈夐檺鍒?
-# 濡傛灉闇€瑕佹暟鎹簱灞傞潰鐨勫敮涓€鎬э紝鍙互鑰冭檻浣跨敤鍝堝笇瀛楁鎴栫缉鐭矾寰勯暱搴?
+# 注意：path 字段的唯一性由应用层保证，因为 MySQL 对长字段的唯一索引有限制
+# 如果需要数据库层面的唯一性，可以考虑使用哈希字段或缩短路径长度
 Index('idx_video_edit_tasks_status_time', VideoEditTask.status, VideoEditTask.created_at)
 Index('idx_video_edit_tasks_update_time', VideoEditTask.updated_at)
 

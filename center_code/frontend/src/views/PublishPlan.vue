@@ -1149,6 +1149,7 @@ const handleSubmit = async () => {
           const video = videoLibrary.value.find(v => v.id === it.video_id)
           if (video) {
             console.log('添加视频:', { videoId: it.video_id, videoName: video.video_name, scheduleTime: it.schedule_time })
+            console.log('添加视频:', { videoId: it.video_id, videoName: video.video_name, scheduleTime: it.schedule_time })
             const addVideoResponse = await addVideoToPlan(planId, {
               video_url: video.video_url,
               video_title: it.video_title || video.video_name || '',

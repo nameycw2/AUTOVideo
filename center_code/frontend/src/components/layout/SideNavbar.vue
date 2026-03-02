@@ -13,54 +13,51 @@
     >
       <el-menu-item index="/dashboard" route="/dashboard">
         <el-icon><ChatDotRound /></el-icon>
-        <template #title>棣栭〉</template>
+        <template #title>首页</template>
       </el-menu-item>
       
       <el-menu-item index="/publish">
         <el-icon><Promotion /></el-icon>
-        <template #title>绔嬪嵆鍙戝竷</template>
+        <template #title>立即发布</template>
       </el-menu-item>
       
       <el-menu-item index="/publish-plan">
         <el-icon><Calendar /></el-icon>
-        <template #title>鍙戝竷璁″垝</template>
+        <template #title>发布计划</template>
       </el-menu-item>
       
       <el-menu-item index="/publish-history">
         <el-icon><Clock /></el-icon>
-        <template #title>鍙戝竷鍘嗗彶</template>
+        <template #title>发布历史</template>
       </el-menu-item>
       
       <el-menu-item index="/accounts">
         <el-icon><UserFilled /></el-icon>
-        <template #title>鎺堟潈绠＄悊</template>
+        <template #title>授权管理</template>
       </el-menu-item>
       
       <el-menu-item index="/data-center">
         <el-icon><DataAnalysis /></el-icon>
-        <template #title>鏁版嵁涓績</template>
+        <template #title>数据中心</template>
       </el-menu-item>
       
       <el-menu-item index="/merchants">
         <el-icon><OfficeBuilding /></el-icon>
-        <template #title>鍟嗗绠＄悊</template>
+        <template #title>商家管理</template>
       </el-menu-item>
       
       <el-menu-item index="/video-library">
         <el-icon><VideoCamera /></el-icon>
-        <template #title>浜戣棰戝簱</template>
+        <template #title>云视频库</template>
       </el-menu-item>
       
       <el-menu-item index="/video-editor">
         <el-icon><Edit /></el-icon>
-        <template #title>AI瑙嗛鍓緫</template>
+        <template #title>AI视频剪辑</template>
       </el-menu-item>
-      <el-menu-item index="/ai-video-generator">
-        <el-icon><MagicStick /></el-icon>
-        <template #title>AI视频生成</template>
-      </el-menu-item>      <el-menu-item v-if="showUserManagement" index="/user-management">
+      <el-menu-item v-if="showUserManagement" index="/user-management">
         <el-icon><User /></el-icon>
-        <template #title>鐢ㄦ埛绠＄悊</template>
+        <template #title>用户管理</template>
       </el-menu-item>
     </el-menu>
   </div>
@@ -70,7 +67,7 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuthStore } from '../../stores/auth'
-// 鍥炬爣宸插湪 main.js 涓叏灞€娉ㄥ唽
+// 图标已在 main.js 中全局注册
 
 defineProps({
   collapsed: {

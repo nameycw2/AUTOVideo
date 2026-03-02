@@ -130,26 +130,51 @@ const handleLogin = async () => {
     try {
       const res = await api.auth.login(payload)
       // 兼容响应被包一层的情况（如代理返回 { data: { code, message, data, token } }）
-      const body = (res && res.data && typeof res.data === 'object' && (res.data.code !== undefined || res.data.token !== undefined))
-        ? res.data
-        : res
+      // 只有当res.data包含code字段时，才说明被代理包了一层，否则直接使用res
+      let body = res
+      if (res && res.data && typeof res.data === 'object' && res.data.code !== undefined) {
+        // res.data有code字段，说明被包了一层，使用res.data
+        body = res.data
+      }
+      // 否则body就是res本身（标准响应格式）
+      
       const code = body && body.code
       const message = (body && body.message) || ''
+      // 尝试多种方式提取token：body.data.token > body.token
       const token = (body && body.data && body.data.token) || (body && body.token)
+      
+      // console.log('登录响应:', { res, body, code, message, token, hasToken: !!token }) // 调试日志
+      
+      // 如果有token且状态码是200/201，登录成功
       if (token && (code === 200 || code === 201)) {
         authStore.setToken(String(token))
-        authStore.username = (body.data && body.data.username) ?? payload.username ?? payload.email ?? ''
-        authStore.email = (body.data && body.data.email) ?? payload.email ?? ''
-        authStore.avatarUrl = (body.data && body.data.avatar_url) ?? ''
-        authStore.role = (body.data && body.data.role) ?? ''
-        authStore.parentId = (body.data && body.data.parent_id) != null ? body.data.parent_id : null
+        // 从body.data或body中提取用户信息
+        const userData = body.data || body
+        authStore.username = userData.username ?? payload.username ?? payload.email ?? ''
+        authStore.email = userData.email ?? payload.email ?? ''
+        authStore.avatarUrl = userData.avatar_url ?? ''
+        authStore.role = userData.role ?? ''
+        authStore.parentId = userData.parent_id != null ? userData.parent_id : null
         router.replace('/')
         return
       }
+      
+      // 如果状态码是200/201但message包含成功信息，也认为是成功
       if (body && (code === 200 || code === 201) && /login\s*success|登录成功/i.test(message)) {
         ElMessage.success(message || '登录成功')
+        // 如果没有token但有成功消息，可能是响应格式问题
+        if (!token) {
+          console.error('登录成功但未获取到token，响应格式:', body)
+          ElMessage.warning('登录成功，但未获取到token，请刷新页面重试')
+        }
       } else {
-        ElMessage.error(message || '登录失败')
+        // 如果code是200/201但没有token和成功消息，可能是响应格式问题
+        if (code === 200 || code === 201) {
+          console.error('登录响应格式异常:', body)
+          ElMessage.error(message || '登录失败：响应格式异常，请查看控制台')
+        } else {
+          ElMessage.error(message || '登录失败')
+        }
       }
     } catch (err) {
       const msg = err?.message || err?.data?.message || '登录失败'

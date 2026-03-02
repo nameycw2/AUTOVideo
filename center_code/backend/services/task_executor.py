@@ -12,6 +12,7 @@ import requests
 from pathlib import Path
 from typing import Dict, Optional
 from datetime import datetime
+from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 from sqlalchemy.orm import Session
@@ -386,7 +387,10 @@ async def execute_video_upload(task_id: int):
                     try:
                         tags = json.loads(task.video_tags)
                     except:
-                        tags = [tag.strip() for tag in task.video_tags.split(',') if tag.strip()]
+                        # 不是JSON，按逗号分隔（支持中文逗号和英文逗号）
+                        # 先替换中文逗号为英文逗号，然后分割
+                        tags_str = task.video_tags.replace('，', ',')  # 替换中文逗号为英文逗号
+                        tags = [tag.strip() for tag in tags_str.split(',') if tag.strip()]
                 elif isinstance(task.video_tags, list):
                     tags = task.video_tags
             # 确保为字符串列表并按平台数量上限截断
@@ -625,17 +629,39 @@ async def execute_video_upload(task_id: int):
             # 更新对应的 PlanVideo 状态为 published（如果该任务来自发布计划）
             try:
                 from models import PlanVideo, PublishPlan
+                # 先尝试精确匹配 video_url 和 processing 状态
                 plan_video = db.query(PlanVideo).filter(
                     PlanVideo.video_url == task.video_url,
-                    PlanVideo.status == 'processing'  # 只更新处理中的视频
+                    PlanVideo.status == 'processing'
                 ).first()
+                
+                # 如果没找到，尝试匹配 video_url（可能是状态已经是其他值，或者URL有细微差别）
+                if not plan_video:
+                    # 尝试模糊匹配：去掉URL参数后匹配
+                    task_url_base = urlparse(task.video_url).path
+                    all_plan_videos = db.query(PlanVideo).filter(
+                        PlanVideo.status.in_(['processing', 'pending'])  # 可能是 processing 或 pending
+                    ).all()
+                    for pv in all_plan_videos:
+                        pv_url_base = urlparse(pv.video_url).path
+                        if task_url_base == pv_url_base or task.video_url in pv.video_url or pv.video_url in task.video_url:
+                            plan_video = pv
+                            print(f"[TASK STATUS] 通过URL模糊匹配找到 PlanVideo {pv.id} (原URL: {pv.video_url[:100]}..., 任务URL: {task.video_url[:100]}...)")
+                            break
+                
                 if plan_video:
+                    old_status = plan_video.status
                     plan_video.status = 'published'
+                    print(f"[TASK STATUS] 更新 PlanVideo {plan_video.id} 状态: {old_status} -> published")
+                    
+                    # 先提交 PlanVideo 状态更新，确保统计时能获取到最新状态
+                    db.commit()
+                    db.refresh(plan_video)  # 刷新对象
                     
                     # 更新发布计划的统计信息
                     plan = db.query(PublishPlan).filter(PublishPlan.id == plan_video.plan_id).first()
                     if plan:
-                        # 重新统计
+                        # 重新统计（在 PlanVideo 状态已提交后）
                         published_count = db.query(PlanVideo).filter(
                             PlanVideo.plan_id == plan.id,
                             PlanVideo.status == 'published'
@@ -648,23 +674,45 @@ async def execute_video_upload(task_id: int):
                             PlanVideo.plan_id == plan.id,
                             PlanVideo.status == 'pending'
                         ).count()
+                        failed_count = db.query(PlanVideo).filter(
+                            PlanVideo.plan_id == plan.id,
+                            PlanVideo.status == 'failed'
+                        ).count()
                         
+                        old_published_count = plan.published_count
                         plan.published_count = published_count
                         plan.pending_count = pending_count
                         plan.updated_at = datetime.now()
+                        
+                        print(f"[TASK STATUS] 发布计划 {plan.id} 统计更新: 已发布={published_count} (之前={old_published_count}), 处理中={processing_count}, 待处理={pending_count}, 失败={failed_count}")
                         
                         # 如果所有视频都已处理完成，标记计划为 completed
                         if pending_count == 0 and processing_count == 0:
                             plan.status = 'completed'
                             print(f"[TASK STATUS] 发布计划 {plan.id} 所有视频已处理完成，状态更新为 completed")
+                        else:
+                            # 如果还有待处理的视频，将计划状态改回 pending，以便后续继续处理
+                            if plan.status == 'publishing' and pending_count > 0:
+                                plan.status = 'pending'
+                                print(f"[TASK STATUS] 发布计划 {plan.id} 还有 {pending_count} 个视频待处理，状态改回 pending 以便后续处理")
                     
                     db.commit()
-                    print(f"[TASK STATUS] 已更新发布计划视频状态: PlanVideo {plan_video.id} -> published")
+                    print(f"[TASK STATUS] ✅ 已更新发布计划视频状态: PlanVideo {plan_video.id} -> published, 计划 {plan.id if plan else 'N/A'} 已发布数: {published_count}")
                     if douyin_logger:
-                        douyin_logger.info(f"已更新发布计划视频状态: PlanVideo {plan_video.id} -> published")
+                        douyin_logger.info(f"已更新发布计划视频状态: PlanVideo {plan_video.id} -> published, 计划已发布数: {published_count}")
+                else:
+                    print(f"[TASK STATUS] ⚠️ 未找到匹配的 PlanVideo (任务 video_url: {task.video_url[:100]}...)")
+                    # 尝试查找所有相关的 PlanVideo 用于调试
+                    all_related = db.query(PlanVideo).filter(
+                        PlanVideo.video_url.like(f"%{urlparse(task.video_url).path.split('/')[-1]}%")
+                    ).all()
+                    if all_related:
+                        print(f"[TASK STATUS] 找到 {len(all_related)} 个可能相关的 PlanVideo，但URL不完全匹配")
             except Exception as plan_video_error:
                 # 如果更新 PlanVideo 失败，不影响任务状态更新
-                print(f"[TASK STATUS] 更新 PlanVideo 状态失败（不影响任务完成）: {plan_video_error}")
+                print(f"[TASK STATUS] ❌ 更新 PlanVideo 状态失败（不影响任务完成）: {plan_video_error}")
+                import traceback
+                traceback.print_exc()
                 if douyin_logger:
                     douyin_logger.warning(f"更新 PlanVideo 状态失败: {plan_video_error}")
             if douyin_logger:

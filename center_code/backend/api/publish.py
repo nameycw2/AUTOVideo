@@ -232,6 +232,16 @@ def submit_publish():
         if not video_id and not video_url:
             return response_error('video_id or video_url is required', 400)
         
+        # 验证定时发布和间隔发布的时间设置
+        if publish_type == 'scheduled' and not publish_date:
+            return response_error('publish_date is required for scheduled publish', 400)
+        
+        if publish_type == 'interval':
+            if not publish_date:
+                return response_error('publish_date is required for interval publish', 400)
+            if not publish_interval or publish_interval < 1:
+                return response_error('publish_interval must be at least 1 minute', 400)
+        
         with get_db() as db:
             # 1. 获取视频URL（如果提供了video_id，从视频库获取）
             final_video_url = video_url

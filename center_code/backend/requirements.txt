@@ -12,6 +12,7 @@ aiohttp==3.9.5
 
 # 若后续用FFmpeg，需安装：
 ffmpeg-python==0.2.0
+imageio-ffmpeg>=0.4.8
 openai>=1.0.0
 
 # DashScope TTS SDK

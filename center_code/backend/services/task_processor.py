@@ -4,6 +4,7 @@
 """
 import threading
 import time
+import json
 from datetime import datetime
 from sqlalchemy.orm import Session
 
@@ -64,20 +65,92 @@ class TaskProcessor:
             now = datetime.now()
             
             # 1. 检查到期的发布计划
-            publish_plans = db.query(PublishPlan).filter(
+            # 对于分阶段发布：检查是否有视频的 schedule_time 到期
+            # 对于批量发布：检查计划的 publish_time 是否到期
+            publish_plans_to_process = []
+            
+            # 先检查有 publish_time 的计划（批量发布）
+            plans_with_publish_time = db.query(PublishPlan).filter(
                 PublishPlan.status == 'pending',
                 PublishPlan.publish_time <= now,
                 PublishPlan.publish_time.isnot(None)
-            ).limit(10).all()  # 限制每次最多处理10个，避免阻塞
+            ).limit(10).all()
             
-            if publish_plans:
-                print(f"[定时检查] 发现 {len(publish_plans)} 个到期的发布计划，触发处理")
+            for plan in plans_with_publish_time:
+                # 检查是否有视频的 schedule_time 到期（分阶段发布）
+                # 如果有视频设置了 schedule_time，说明是分阶段发布，需要检查视频的 schedule_time
+                videos_with_schedule = db.query(PlanVideo).filter(
+                    PlanVideo.plan_id == plan.id,
+                    PlanVideo.status == 'pending',
+                    PlanVideo.schedule_time.isnot(None),
+                    PlanVideo.schedule_time <= now
+                ).count()
+                
+                # 如果没有视频设置 schedule_time，或者计划的 publish_time 到了，则处理
+                # 如果有视频设置了 schedule_time，只有当有视频的 schedule_time 到期时才处理
+                videos_total = db.query(PlanVideo).filter(PlanVideo.plan_id == plan.id).count()
+                videos_with_schedule_total = db.query(PlanVideo).filter(
+                    PlanVideo.plan_id == plan.id,
+                    PlanVideo.schedule_time.isnot(None)
+                ).count()
+                
+                # 如果所有视频都有 schedule_time，说明是分阶段发布，只检查视频的 schedule_time
+                if videos_with_schedule_total > 0 and videos_with_schedule_total == videos_total:
+                    # 分阶段发布：只有当有视频的 schedule_time 到期时才处理
+                    if videos_with_schedule > 0:
+                        publish_plans_to_process.append(plan)
+                else:
+                    # 批量发布或混合模式：计划的 publish_time 到了就处理
+                    publish_plans_to_process.append(plan)
+            
+            # 检查没有 publish_time 但有视频 schedule_time 已到的计划（纯分阶段发布）
+            plans_without_publish_time = db.query(PublishPlan).filter(
+                PublishPlan.status == 'pending',
+                PublishPlan.publish_time.is_(None)  # 计划的 publish_time 为空
+            ).limit(10).all()
+            
+            if plans_without_publish_time:
+                print(f"[定时检查] 检查 {len(plans_without_publish_time)} 个没有全局发布时间的计划（分阶段发布）")
+            
+            for plan in plans_without_publish_time:
+                # 检查是否有视频的 schedule_time 到期
+                videos_with_schedule = db.query(PlanVideo).filter(
+                    PlanVideo.plan_id == plan.id,
+                    PlanVideo.status == 'pending',
+                    PlanVideo.schedule_time.isnot(None),
+                    PlanVideo.schedule_time <= now
+                ).all()
+                
+                if videos_with_schedule:
+                    print(f"[定时检查] ✓ 发现分阶段发布计划 {plan.id} ({plan.plan_name}) 有 {len(videos_with_schedule)} 个视频的 schedule_time 已到期")
+                    for v in videos_with_schedule:
+                        print(f"  - 视频 {v.id}: schedule_time={v.schedule_time}, 当前时间={now}")
+                    publish_plans_to_process.append(plan)
+                else:
+                    # 打印调试信息：只检查待发布的视频状态
+                    pending_videos = db.query(PlanVideo).filter(
+                        PlanVideo.plan_id == plan.id,
+                        PlanVideo.status == 'pending'
+                    ).all()
+                    if pending_videos:
+                        print(f"[定时检查] 计划 {plan.id} 的待发布视频状态检查:")
+                        for v in pending_videos:
+                            status_info = f"视频 {v.id}: status={v.status}, schedule_time={v.schedule_time}"
+                            if v.schedule_time:
+                                time_diff = (v.schedule_time - now).total_seconds()
+                                status_info += f", 距离发布时间还有 {int(time_diff)} 秒"
+                            print(f"  - {status_info}")
+            
+            if publish_plans_to_process:
+                print(f"[定时检查] 发现 {len(publish_plans_to_process)} 个到期的发布计划，触发处理")
                 # 触发完整处理（在后台线程中）
                 def trigger_processing():
                     try:
                         self._process_pending_tasks()
                     except Exception as e:
                         print(f"[定时检查] 触发任务处理失败: {e}")
+                        import traceback
+                        traceback.print_exc()
                 
                 thread = threading.Thread(target=trigger_processing, daemon=True)
                 thread.start()
@@ -188,54 +261,126 @@ class TaskProcessor:
         """处理待处理的任务"""
         with get_db() as db:
             # 1. 处理发布计划
-            # 查找所有状态为pending且publish_time已到的发布计划
-            # 排除已完成、失败和正在处理中的计划，避免重复处理
+            # 对于批量发布：查找 publish_time 已到的计划
+            # 对于分阶段发布：查找有视频 schedule_time 已到的计划（即使计划的 publish_time 为空）
             now = datetime.now()
-            publish_plans = db.query(PublishPlan).filter(
+            
+            # 先查找有 publish_time 且已到的计划（批量发布）
+            plans_with_publish_time = db.query(PublishPlan).filter(
                 PublishPlan.status == 'pending',
                 PublishPlan.publish_time <= now,
-                PublishPlan.publish_time.isnot(None)  # 确保有发布时间
+                PublishPlan.publish_time.isnot(None)
             ).all()
+            
+            # 查找没有 publish_time 的计划（分阶段发布）
+            # 注意：对于分阶段发布，即使计划状态是 publishing，也应该继续检查是否有新的视频到期
+            plans_without_publish_time = db.query(PublishPlan).filter(
+                PublishPlan.publish_time.is_(None),  # 计划的 publish_time 为空
+                PublishPlan.status.in_(['pending', 'publishing'])  # 允许 pending 和 publishing 状态
+            ).all()
+            
+            # 检查这些计划是否有视频的 schedule_time 到期
+            plans_with_video_schedule = []
+            for plan in plans_without_publish_time:
+                videos_ready = db.query(PlanVideo).filter(
+                    PlanVideo.plan_id == plan.id,
+                    PlanVideo.status == 'pending',
+                    PlanVideo.schedule_time <= now,
+                    PlanVideo.schedule_time.isnot(None)
+                ).count()
+                if videos_ready > 0:
+                    plans_with_video_schedule.append(plan)
+            
+            # 合并两种类型的计划
+            publish_plans = list(plans_with_publish_time) + plans_with_video_schedule
             
             if publish_plans:
                 print(f"[TASK POLL] 发现 {len(publish_plans)} 个到期的发布计划")
                 
                 for plan in publish_plans:
                     try:
-                        # 双重检查：确保计划状态仍然是pending（防止并发处理）
+                        # 双重检查：确保计划状态是 pending 或 publishing（分阶段发布允许 publishing 状态继续处理）
                         db.refresh(plan)
-                        if plan.status != 'pending':
-                            print(f"[TASK POLL] 发布计划 {plan.id} 状态已变更为 {plan.status}，跳过处理（可能已被其他进程处理）")
+                        if plan.status not in ['pending', 'publishing']:
+                            print(f"[TASK POLL] 发布计划 {plan.id} 状态已变更为 {plan.status}，跳过处理（可能已完成或失败）")
                             continue
                         
-                        print(f"[TASK POLL] 处理发布计划: {plan.plan_name} (ID: {plan.id})")
-                        # 更新计划状态为publishing（防止重复处理）
-                        plan.status = 'publishing'
+                        print(f"[TASK POLL] 处理发布计划: {plan.plan_name} (ID: {plan.id}), 当前状态: {plan.status}")
+                        # 如果状态是 pending，更新为 publishing（防止重复处理）
+                        # 如果状态已经是 publishing（分阶段发布），保持 publishing 状态
+                        if plan.status == 'pending':
+                            plan.status = 'publishing'
                         plan.updated_at = now
                         db.commit()
                         
-                        # 获取计划关联的视频（只处理状态为pending的视频，避免重复发布）
-                        plan_videos = db.query(PlanVideo).filter(
+                        # 获取计划关联的视频
+                        # 对于分阶段发布：只处理 schedule_time <= now 的视频
+                        # 对于批量发布：处理所有 pending 状态的视频
+                        video_query = db.query(PlanVideo).filter(
                             PlanVideo.plan_id == plan.id,
                             PlanVideo.status == 'pending'  # 只处理未发布的视频
-                        ).all()
+                        )
+                        
+                        # 如果是分阶段发布，只处理到期的视频（schedule_time <= now）
+                        # 如果视频没有 schedule_time，使用计划的 publish_time
+                        plan_videos = []
+                        for video in video_query.all():
+                            # 确定该视频的发布时间
+                            video_publish_time = video.schedule_time if video.schedule_time else plan.publish_time
+                            # 如果没有发布时间，或者发布时间已到，则处理
+                            if video_publish_time is None or video_publish_time <= now:
+                                plan_videos.append(video)
                         
                         if not plan_videos:
-                            print(f"[TASK POLL] 发布计划 {plan.id} 没有关联的视频，跳过")
-                            plan.status = 'completed'
+                            print(f"[TASK POLL] 发布计划 {plan.id} 没有需要处理的视频（可能都在等待各自的发布时间），跳过")
+                            # 检查是否所有视频都已处理完成
+                            all_videos = db.query(PlanVideo).filter(PlanVideo.plan_id == plan.id).all()
+                            if all_videos:
+                                # 检查是否还有待处理的视频（可能在等待各自的发布时间）
+                                pending_videos = [v for v in all_videos if v.status == 'pending']
+                                if not pending_videos:
+                                    plan.status = 'completed'
+                                    print(f"[TASK POLL] 发布计划 {plan.id} 所有视频已处理完成，状态更新为 completed")
+                                else:
+                                    print(f"[TASK POLL] 发布计划 {plan.id} 还有 {len(pending_videos)} 个视频等待各自的发布时间")
+                            else:
+                                plan.status = 'completed'
+                                print(f"[TASK POLL] 发布计划 {plan.id} 没有关联的视频，状态更新为 completed")
                             plan.updated_at = now
                             db.commit()
                             continue
                         
-                        # 获取该平台下的所有已登录账号
+                        # 获取账号列表：优先使用计划中指定的账号，否则使用该平台下的所有已登录账号
                         from models import Account
-                        accounts = db.query(Account).filter(
-                            Account.platform == plan.platform,
-                            Account.login_status == 'logged_in'
-                        ).all()
+                        import json as json_module  # 显式导入，避免作用域问题
+                        account_ids_list = None
+                        if plan.account_ids:
+                            try:
+                                account_ids_list = json_module.loads(plan.account_ids)
+                                if not isinstance(account_ids_list, list) or len(account_ids_list) == 0:
+                                    account_ids_list = None
+                            except (ValueError, TypeError) as e:
+                                print(f"[TASK POLL] 发布计划 {plan.id} 的 account_ids 格式错误: {e}，将使用所有已登录账号")
+                                account_ids_list = None
+                        
+                        if account_ids_list:
+                            # 使用指定的账号ID列表
+                            accounts = db.query(Account).filter(
+                                Account.id.in_(account_ids_list),
+                                Account.platform == plan.platform,
+                                Account.login_status == 'logged_in'
+                            ).all()
+                            print(f"[TASK POLL] 发布计划 {plan.id} 使用指定的 {len(accounts)} 个账号（从 {len(account_ids_list)} 个ID中选择）")
+                        else:
+                            # 使用该平台下的所有已登录账号
+                            accounts = db.query(Account).filter(
+                                Account.platform == plan.platform,
+                                Account.login_status == 'logged_in'
+                            ).all()
+                            print(f"[TASK POLL] 发布计划 {plan.id} 使用该平台下的所有已登录账号（共 {len(accounts)} 个）")
                         
                         if not accounts:
-                            print(f"[TASK POLL] 发布计划 {plan.id} 的平台 {plan.platform} 没有已登录的账号，跳过")
+                            print(f"[TASK POLL] 发布计划 {plan.id} 的平台 {plan.platform} 没有可用的已登录账号，跳过")
                             plan.status = 'failed'
                             plan.updated_at = now
                             db.commit()
@@ -302,12 +447,32 @@ class TaskProcessor:
                                         # 不再 continue，后续统计和任务处理会把该任务当作新的待处理任务
                                         continue
                                 
+                                # 处理 video_tags：如果是字符串（逗号分隔），转换为列表
+                                video_tags_list = []
+                                if video.video_tags:
+                                    if isinstance(video.video_tags, str):
+                                        # 尝试解析为JSON，如果不是JSON则按逗号分隔
+                                        try:
+                                            import json as json_module
+                                            video_tags_list = json_module.loads(video.video_tags)
+                                            if not isinstance(video_tags_list, list):
+                                                video_tags_list = [video.video_tags]
+                                        except (ValueError, TypeError):
+                                            # 不是JSON，按逗号分隔（支持中文逗号和英文逗号）
+                                            # 先替换中文逗号为英文逗号，然后分割
+                                            tags_str = video.video_tags.replace('，', ',')  # 替换中文逗号为英文逗号
+                                            video_tags_list = [tag.strip() for tag in tags_str.split(',') if tag.strip()]
+                                    elif isinstance(video.video_tags, list):
+                                        video_tags_list = video.video_tags
+                                
                                 # 创建视频任务
                                 video_task = VideoTask(
                                     account_id=account.id,
                                     device_id=account.device_id,
                                     video_url=video.video_url,
                                     video_title=video.video_title or f"视频 {i+1}",
+                                    video_description=video.video_description or '',  # 使用 PlanVideo 的正文
+                                    video_tags=','.join(video_tags_list) if video_tags_list else None,  # 转换为逗号分隔的字符串
                                     thumbnail_url=video.thumbnail_url,
                                     status='pending'
                                 )

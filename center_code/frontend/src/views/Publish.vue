@@ -409,6 +409,18 @@
                 value-format="YYYY-MM-DD HH:mm:ss"
               />
             </el-form-item>
+            <el-form-item v-if="publishType === 'interval'" label="开始时间">
+              <el-date-picker
+                v-model="form.publish_date"
+                type="datetime"
+                placeholder="选择开始发布时间"
+                style="width: 100%;"
+                value-format="YYYY-MM-DD HH:mm:ss"
+              />
+              <div style="font-size: 12px; color: #909399; margin-top: 4px;">
+                💡 提示：第一个账号在此时间发布，后续账号按间隔依次发布
+              </div>
+            </el-form-item>
             <el-form-item v-if="publishType === 'interval'" label="发布间隔">
               <el-input-number
                 v-model="publishInterval"
@@ -418,6 +430,9 @@
                 style="width: 200px;"
               />
               <span style="margin-left: 10px;">分钟</span>
+              <div style="font-size: 12px; color: #909399; margin-top: 4px;">
+                💡 提示：每个账号之间的发布间隔时间
+              </div>
             </el-form-item>
             <el-form-item label="发布优先级">
               <el-radio-group v-model="form.priority">
@@ -1159,6 +1174,21 @@ const handleSubmit = async () => {
       return
     }
   }
+  // 验证定时发布和间隔发布的时间设置
+  if (publishType.value === 'scheduled' && !form.value.publish_date) {
+    ElMessage.warning('请选择发布时间')
+    return
+  }
+  if (publishType.value === 'interval') {
+    if (!form.value.publish_date) {
+      ElMessage.warning('请选择开始发布时间')
+      return
+    }
+    if (!publishInterval.value || publishInterval.value < 1) {
+      ElMessage.warning('请设置发布间隔（至少1分钟）')
+      return
+    }
+  }
 
   try {
     submitting.value = true
@@ -1170,7 +1200,7 @@ const handleSubmit = async () => {
       video_tags: form.value.video_tags_array,
       thumbnail_url: form.value.thumbnail_url,
       account_ids: form.value.account_ids,
-      publish_date: publishType.value === 'scheduled' ? form.value.publish_date : undefined,
+      publish_date: (publishType.value === 'scheduled' || publishType.value === 'interval') ? form.value.publish_date : undefined,
       publish_type: publishType.value,
       publish_interval: publishType.value === 'interval' ? publishInterval.value : undefined,
       priority: form.value.priority,

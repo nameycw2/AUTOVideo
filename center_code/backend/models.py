@@ -166,6 +166,7 @@ class PublishPlan(Base):
     pending_count = Column(Integer, default=0)
     claimed_count = Column(Integer, default=0)
     account_count = Column(Integer, default=0)
+    account_ids = Column(Text, nullable=True)  # JSON字符串，存储指定的账号ID列表，如 "[1,2,3]"
     distribution_mode = Column(String(50), default='manual')  # manual, sms, qrcode, ai
     status = Column(String(50), default='pending')  # pending, publishing, completed, failed
     publish_time = Column(DateTime)
@@ -181,8 +182,11 @@ class PlanVideo(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     plan_id = Column(Integer, ForeignKey('publish_plans.id'), nullable=False)
     video_url = Column(String(1000), nullable=False)
-    video_title = Column(String(500))
+    video_title = Column(String(500))  # 视频标题
+    video_description = Column(Text, nullable=True)  # 视频正文/描述
+    video_tags = Column(String(500), nullable=True)  # 视频标签/话题，逗号分隔或JSON格式
     thumbnail_url = Column(String(1000))
+    schedule_time = Column(DateTime, nullable=True)  # 该视频的发布时间（用于分阶段发布），如果为None则使用计划的publish_time
     status = Column(String(50), default='pending')
     created_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now())
 

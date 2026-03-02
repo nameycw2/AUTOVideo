@@ -5,6 +5,7 @@ from flask import Blueprint, request
 from datetime import datetime
 import sys
 import os
+import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import response_success, response_error, login_required
 from models import PublishPlan, PlanVideo, Merchant, VideoTask
@@ -170,6 +171,7 @@ def create_publish_plan():
         merchant_id = data.get('merchant_id')
         distribution_mode = data.get('distribution_mode', 'manual')
         publish_time = data.get('publish_time')
+        account_ids = data.get('account_ids', [])  # 获取指定的账号ID列表
         
         if not plan_name:
             return response_error('plan_name is required', 400)
@@ -182,6 +184,18 @@ def create_publish_plan():
             except ValueError:
                 return response_error('Invalid publish_time format. Please use ISO format (YYYY-MM-DD HH:mm:ss)', 400)
         
+        # 处理账号ID列表：转换为JSON字符串存储
+        account_ids_json = None
+        account_count = 0
+        if account_ids and isinstance(account_ids, list) and len(account_ids) > 0:
+            # 确保都是整数
+            try:
+                account_ids = [int(aid) for aid in account_ids if aid is not None]
+                account_ids_json = json.dumps(account_ids)
+                account_count = len(account_ids)
+            except (ValueError, TypeError) as e:
+                return response_error(f'Invalid account_ids format: {e}', 400)
+        
         with get_db() as db:
             plan = PublishPlan(
                 plan_name=plan_name,
@@ -189,6 +203,8 @@ def create_publish_plan():
                 merchant_id=merchant_id,
                 distribution_mode=distribution_mode,
                 publish_time=parsed_publish_time,
+                account_ids=account_ids_json,
+                account_count=account_count,
                 status='pending'
             )
             db.add(plan)
@@ -275,15 +291,19 @@ def get_publish_plan(plan_id):
                 merchant_name = merchant.merchant_name if merchant else None
             
             # 获取计划中的视频
-            videos = db.query(PlanVideo).filter(PlanVideo.plan_id == plan_id).all()
+            videos = db.query(PlanVideo).filter(PlanVideo.plan_id == plan_id).order_by(PlanVideo.created_at.asc()).all()
             videos_list = []
             for video in videos:
                 videos_list.append({
                     'id': video.id,
                     'video_url': video.video_url,
                     'video_title': video.video_title,
+                    'video_description': video.video_description or '',
+                    'video_tags': video.video_tags or '',
                     'thumbnail_url': video.thumbnail_url,
-                    'status': video.status
+                    'schedule_time': video.schedule_time.isoformat() if video.schedule_time else None,
+                    'status': video.status,
+                    'created_at': video.created_at.isoformat() if video.created_at else None
                 })
             
             return response_success({
@@ -370,6 +390,21 @@ def update_publish_plan(plan_id):
                         return response_error('Invalid publish_time format. Please use ISO format (YYYY-MM-DD HH:mm:ss)', 400)
                 else:
                     plan.publish_time = None
+            
+            # 更新账号ID列表
+            if 'account_ids' in data:
+                account_ids = data['account_ids']
+                account_ids_json = None
+                account_count = 0
+                if account_ids and isinstance(account_ids, list) and len(account_ids) > 0:
+                    try:
+                        account_ids = [int(aid) for aid in account_ids if aid is not None]
+                        account_ids_json = json.dumps(account_ids)
+                        account_count = len(account_ids)
+                    except (ValueError, TypeError) as e:
+                        return response_error(f'Invalid account_ids format: {e}', 400)
+                plan.account_ids = account_ids_json
+                plan.account_count = account_count
             
             plan.updated_at = datetime.now()
             
@@ -495,10 +530,20 @@ def add_video_to_plan(plan_id):
         data = request.json
         video_url = data.get('video_url')
         video_title = data.get('video_title')
+        video_description = data.get('video_description')  # 视频正文/描述
+        video_tags = data.get('video_tags')  # 视频标签/话题，可以是字符串（逗号分隔）或列表
         thumbnail_url = data.get('thumbnail_url')
         
         if not video_url:
             return response_error('video_url is required', 400)
+        
+        # 处理 video_tags：如果是列表，转换为逗号分隔的字符串；如果是字符串，直接使用
+        video_tags_str = None
+        if video_tags:
+            if isinstance(video_tags, list):
+                video_tags_str = ','.join([str(tag).strip() for tag in video_tags if tag])
+            elif isinstance(video_tags, str):
+                video_tags_str = video_tags.strip()
         
         with get_db() as db:
             plan = db.query(PublishPlan).filter(PublishPlan.id == plan_id).first()
@@ -520,11 +565,23 @@ def add_video_to_plan(plan_id):
                     'message': 'Video already exists in this plan'
                 }, 'Video already exists in this plan', 200)
             
+            # 从请求中获取该视频的发布时间（用于分阶段发布）
+            schedule_time = data.get('schedule_time')
+            parsed_schedule_time = None
+            if schedule_time:
+                try:
+                    parsed_schedule_time = datetime.fromisoformat(schedule_time)
+                except ValueError:
+                    return response_error('Invalid schedule_time format. Please use ISO format (YYYY-MM-DD HH:mm:ss)', 400)
+            
             video = PlanVideo(
                 plan_id=plan_id,
                 video_url=video_url,
                 video_title=video_title,
+                video_description=video_description,
+                video_tags=video_tags_str,
                 thumbnail_url=thumbnail_url,
+                schedule_time=parsed_schedule_time,
                 status='pending'
             )
             db.add(video)
@@ -561,6 +618,115 @@ def add_video_to_plan(plan_id):
                 'video_url': video.video_url,
                 'video_title': video.video_title
             }, 'Video added to plan', 201)
+    except Exception as e:
+        return response_error(str(e), 500)
+
+
+@publish_plans_bp.route('/<int:plan_id>/videos/<int:video_id>', methods=['PUT'])
+@login_required
+def update_plan_video(plan_id, video_id):
+    """
+    更新发布计划中的视频信息接口
+    
+    请求方法: PUT
+    路径: /api/publish-plans/{plan_id}/videos/{video_id}
+    认证: 需要登录
+    
+    路径参数:
+        plan_id (int): 发布计划ID
+        video_id (int): 计划视频ID
+    
+    请求体 (JSON):
+        {
+            "video_title": "string",        # 可选，视频标题
+            "video_description": "string",   # 可选，视频描述
+            "video_tags": "string",         # 可选，标签（逗号分隔）
+            "schedule_time": "string"        # 可选，发布时间（ISO 格式）
+        }
+    
+    返回数据:
+        成功 (200):
+        {
+            "code": 200,
+            "message": "Video updated",
+            "data": {
+                "id": int,
+                "video_title": "string",
+                "video_description": "string",
+                "video_tags": "string",
+                "schedule_time": "string"
+            }
+        }
+        
+        失败 (404/500):
+        {
+            "code": 404/500,
+            "message": "错误信息",
+            "data": null
+        }
+    
+    说明:
+        - 只更新提供的字段，未提供的字段保持不变
+        - 只能更新未发布的视频（status='pending'）
+        - 如果视频不存在或已发布，返回 404/400 错误
+    """
+    try:
+        data = request.json or {}
+        with get_db() as db:
+            plan = db.query(PublishPlan).filter(PublishPlan.id == plan_id).first()
+            if not plan:
+                return response_error('Publish plan not found', 404)
+            
+            video = db.query(PlanVideo).filter(
+                PlanVideo.id == video_id,
+                PlanVideo.plan_id == plan_id
+            ).first()
+            
+            if not video:
+                return response_error('Video not found in this plan', 404)
+            
+            # 只能更新未发布的视频
+            if video.status != 'pending':
+                return response_error(f'Cannot update video with status: {video.status}. Only pending videos can be updated.', 400)
+            
+            # 更新视频标题
+            if 'video_title' in data:
+                video.video_title = data['video_title'] or None
+            
+            # 更新视频描述
+            if 'video_description' in data:
+                video.video_description = data['video_description'] or None
+            
+            # 更新视频标签
+            if 'video_tags' in data:
+                video_tags = data['video_tags']
+                if video_tags:
+                    video_tags_str = video_tags.strip()
+                else:
+                    video_tags_str = None
+                video.video_tags = video_tags_str
+            
+            # 更新发布时间
+            if 'schedule_time' in data:
+                schedule_time = data['schedule_time']
+                if schedule_time:
+                    try:
+                        video.schedule_time = datetime.fromisoformat(schedule_time)
+                    except ValueError:
+                        return response_error('Invalid schedule_time format. Please use ISO format (YYYY-MM-DD HH:mm:ss)', 400)
+                else:
+                    video.schedule_time = None
+            
+            video.updated_at = datetime.now()
+            db.commit()
+            
+            return response_success({
+                'id': video.id,
+                'video_title': video.video_title,
+                'video_description': video.video_description,
+                'video_tags': video.video_tags,
+                'schedule_time': video.schedule_time.isoformat() if video.schedule_time else None
+            }, 'Video updated')
     except Exception as e:
         return response_error(str(e), 500)
 

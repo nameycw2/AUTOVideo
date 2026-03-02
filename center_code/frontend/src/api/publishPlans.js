@@ -28,3 +28,11 @@ export const savePublishInfo = (planId, data) => {
   return apiClient.post(`/publish-plans/${planId}/save-info`, data)
 }
 
+export const getPlanVideos = (planId) => {
+  return apiClient.get(`/publish-plans/${planId}`)
+}
+
+export const updatePlanVideo = (planId, videoId, data) => {
+  return apiClient.put(`/publish-plans/${planId}/videos/${videoId}`, data)
+}
+

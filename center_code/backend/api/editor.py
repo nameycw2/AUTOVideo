@@ -11,7 +11,7 @@ import json
 import shutil
 import uuid
 import math
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from urllib.parse import urlparse
 from flask import Blueprint, request, send_from_directory
 import requests
@@ -192,7 +192,7 @@ def _resolve_ffmpeg_exe() -> str:
     raise RuntimeError("未找�?FFmpeg，可在系�?PATH 安装或设�?FFMPEG_PATH")
 
 
-def _calculate_output_dimensions(resolution: str, ratio: str) -> tuple[int, int]:
+def _calculate_output_dimensions(resolution: str, ratio: str) -> Tuple[int, int]:
     """
     根据分辨率和比例计算输出视频的宽�?
     
@@ -289,7 +289,11 @@ def _validate_image_duration_seconds(duration: float) -> float:
     return float(duration)
 
 
-def _build_segments_from_request(data: dict, target_width: int = 1080, target_height: int = 1920) -> tuple[list, list, list, list, Optional[str]]:
+def _build_segments_from_request(
+    data: dict,
+    target_width: int = 1080,
+    target_height: int = 1920,
+) -> Tuple[List[str], List[int], List[Dict[str, Any]], List[str], Optional[str]]:
     """
     Returns: (segment_paths, legacy_video_ids, normalized_clips, temp_files, temp_dir)
     
@@ -301,7 +305,7 @@ def _build_segments_from_request(data: dict, target_width: int = 1080, target_he
     clips = data.get("clips")
     video_ids = data.get("video_ids") if clips is None else None
 
-    normalized: list[dict] = []
+    normalized: List[Dict[str, Any]] = []
     if clips is not None:
         if not isinstance(clips, list) or not clips:
             raise ValueError("clips 不能为空")
@@ -344,9 +348,9 @@ def _build_segments_from_request(data: dict, target_width: int = 1080, target_he
                 raise ValueError(f"video_ids[{i}] 必须是整数")
             normalized.append({"type": "video", "materialId": vid})
 
-    segment_paths: list[str] = []
-    temp_files: list[str] = []
-    legacy_video_ids: list[int] = []
+    segment_paths: List[str] = []
+    temp_files: List[str] = []
+    legacy_video_ids: List[int] = []
     temp_dir: Optional[str] = None
     total_seconds = 0.0
 
@@ -402,11 +406,11 @@ def _build_segments_from_request(data: dict, target_width: int = 1080, target_he
 
 def _repeat_last_image_segment_to_cover_voice(
     *,
-    segment_paths: list[str],
-    normalized_clips: list[dict],
+    segment_paths: List[str],
+    normalized_clips: List[Dict[str, Any]],
     voice_path: Optional[str],
     speed: float,
-) -> list[str]:
+) -> List[str]:
     """
     If voice exists and total duration is still short:
     - If clips contains image: repeat image segments in order (alternating) until long enough
@@ -419,7 +423,7 @@ def _repeat_last_image_segment_to_cover_voice(
     if voice_duration <= 0:
         return segment_paths
 
-    image_segments: list[str] = []
+    image_segments: List[str] = []
     for idx, c in enumerate(normalized_clips or []):
         if c.get("type") == "image" and idx < len(segment_paths):
             image_segments.append(segment_paths[idx])

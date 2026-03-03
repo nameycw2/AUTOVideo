@@ -8,7 +8,7 @@ import logging
 import math
 import subprocess
 import uuid
-from typing import Union, Optional, List
+from typing import Union, Optional, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ def tts_alibaba_with_timestamps(
     voice_rate: float,
     voice_file: str,
     voice_volume: float = 1.0,
-) -> tuple[bool, list]:
+) -> Tuple[bool, List]:
     """
     使用阿里云 TTS 生成音频 + 句级时间戳。
     """

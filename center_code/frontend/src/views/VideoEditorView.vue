@@ -1373,6 +1373,9 @@ const subtitleLocalPath = ref('') // 存 uploads 路径，给本地 FFmpeg 用
 const subtitleTimestamps = ref([])  // [{ text, start, end, duration? }, ...]
 const progress = ref({ show: false, value: 0, text: '' })
 
+// 当前剪辑任务（用于页面刷新/返回时恢复）
+const currentTaskId = ref(null)
+
 // 历史任务
 const historyTasks = ref([])
 const historyLoading = ref(false)
@@ -2254,6 +2257,10 @@ async function handleGenerate() {
     if (response.code === 200) {
       const taskId = response.data?.task_id
       if (taskId) {
+        // 记录当前任务 ID，支持页面刷新/返回后恢复
+        currentTaskId.value = taskId
+        localStorage.setItem('ve.currentEditTaskId', String(taskId))
+
         progress.value = { show: true, value: 10, text: '任务已创建，正在处理…' }
         pollTaskStatus(taskId)
       }
@@ -2289,6 +2296,9 @@ async function pollTaskStatus(taskId) {
       const response = await editorApi.getTask(taskId)
       if (response.code === 200) {
         const task = response.data
+        // 持续标记当前任务，避免刷新/返回期间丢失
+        currentTaskId.value = task.id || taskId
+
         progress.value = {
           show: true,
           value: task.progress || 0,
@@ -2300,10 +2310,18 @@ async function pollTaskStatus(taskId) {
             previewUrl.value = task.preview_url
             exportUrl.value = task.preview_url
           }
+          // 任务完成后清理当前任务标记
+          currentTaskId.value = null
+          localStorage.removeItem('ve.currentEditTaskId')
+
           progress.value = { show: false, value: 100, text: '完成' }
           alert('剪辑完成！')
           emit('refresh-outputs')
         } else if (task.status === 'fail') {
+          // 任务失败也清理标记
+          currentTaskId.value = null
+          localStorage.removeItem('ve.currentEditTaskId')
+
           progress.value = { show: false, value: 0, text: task.error_message || '处理失败' }
           alert(`剪辑失败：${task.error_message || '未知错误'}`)
         } else {
@@ -2945,7 +2963,7 @@ watch(effectiveMaterials, () => {
 onMounted(async () => {
   const savedTab = localStorage.getItem('ve.aiTab') || 'copy'
   setAiTab(savedTab)
-  
+
   // 加载 TTS 音色列表
   aiApi.getTtsVoices().then(response => {
     if (response.code === 200) {
@@ -2966,7 +2984,22 @@ onMounted(async () => {
   if (!props.materials || props.materials.length === 0) {
     await loadMaterials()
   }
-  
+
+  // 如果存在未完成的剪辑任务 ID，尝试恢复进度
+  const savedTaskId = localStorage.getItem('ve.currentEditTaskId')
+  if (savedTaskId) {
+    const idNum = Number(savedTaskId)
+    if (Number.isFinite(idNum) && idNum > 0) {
+      currentTaskId.value = idNum
+      // 切到剪辑生成步骤，便于用户看到进度
+      aiTab.value = 'edit'
+      progress.value = { show: true, value: 0, text: '正在恢复上次剪辑任务进度…' }
+      pollTaskStatus(idNum)
+    } else {
+      localStorage.removeItem('ve.currentEditTaskId')
+    }
+  }
+
   // 初始渲染音频配置
   nextTick(() => {
     if (aiTab.value === 'edit') {

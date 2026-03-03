@@ -1,1 +1,0 @@
-import{H as e}from"./index-BhYzGwy6.js";const o=t=>e.get("/data-center/video-stats",{params:t}),n=t=>e.get("/data-center/account-videos",{params:t}),r=t=>e.post("/data-center/fetch-video-data",t);export{n as a,r as f,o as g};

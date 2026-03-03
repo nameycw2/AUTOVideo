@@ -124,32 +124,57 @@ const handleLogin = async () => {
   await formRef.value.validate(async (valid) => {
     if (!valid) return
     loading.value = true
+
     const payload = form.mode === 'code'
       ? { mode: 'code', email: form.email, code: form.code }
       : { mode: 'password', username: form.loginId, password: form.password }
+
     try {
-      // 兼容响应被包一层的情况（如代理返回 { data: { code, message, data, token } }）
-      // 若 res.data 含 code 则用 res.data，否则用 res
+      // 实际调用后端登录接口
+      const res = await api.auth.login(payload)
+
+      // 兼容不同返回格式：
+      // 1) 直接返回 { code, message, data, token }
+      // 2) 代理包一层 { data: { code, message, data, token } }
+      // 3) axios 风格 { data: {...} }
       let body = res
-      if (res && res.data && typeof res.data === 'object' && res.data.code !== undefined) {
-        body = res.data
+
+      // 如果 res 本身就是 { code, token, ... }，直接用 res
+      if (res && typeof res === 'object' && (res.code !== undefined || res.token !== undefined)) {
+        body = res
+      } else if (res && res.data && typeof res.data === 'object') {
+        // 如果 res.data 里有 code/token，就用 res.data
+        if (
+          res.data.code !== undefined ||
+          res.data.token !== undefined ||
+          (res.data.data && (res.data.data.code !== undefined || res.data.data.token !== undefined))
+        ) {
+          body = res.data
+        }
       }
-      // 兼容 body 本身可能是 response.data 的情况
-      if (body && typeof body === 'object' && body.code === undefined && body.token === undefined && body.data && (body.data.code !== undefined || body.data.token !== undefined)) {
+
+      // 再兼容 body 里嵌套一层 data 的情况：{ data: { code, message, data, token } }
+      if (
+        body &&
+        typeof body === 'object' &&
+        body.code === undefined &&
+        body.token === undefined &&
+        body.data &&
+        (body.data.code !== undefined || body.data.token !== undefined)
+      ) {
         body = body.data
       }
-      
+
       const code = body && body.code
       const message = (body && body.message) || ''
-      // 尝试多种方式提取token：body.data.token > body.token
-      const token = (body && body.data && body.data.token) || (body && body.token)
-      
-      // console.log('登录响应:', { res, body, code, message, token, hasToken: !!token }) // 调试日志
-      
-      // 如果有token且状态码是200/201，登录成功
+      // 尝试多种方式提取 token：body.data.token > body.token
+      const token =
+        (body && body.data && body.data.token) ||
+        (body && body.token)
+
+      // 如果有 token 且状态码是 200/201，登录成功
       if (token && (code === 200 || code === 201)) {
         authStore.setToken(String(token))
-        // 从body.data或body中提取用户信息
         const userData = body.data || body
         authStore.username = userData.username ?? payload.username ?? payload.email ?? ''
         authStore.email = userData.email ?? payload.email ?? ''
@@ -159,17 +184,15 @@ const handleLogin = async () => {
         router.replace('/')
         return
       }
-      
-      // 如果状态码是200/201但message包含成功信息，也认为是成功
+
+      // 如果状态码是 200/201 但 message 包含“登录成功”等文案，也认为是成功（兜底）
       if (body && (code === 200 || code === 201) && /login\s*success|登录成功/i.test(message)) {
         ElMessage.success(message || '登录成功')
-        // 如果没有token但有成功消息，可能是响应格式问题
         if (!token) {
           console.error('登录成功但未获取到token，响应格式:', body)
           ElMessage.warning('登录成功，但未获取到token，请刷新页面重试')
         }
       } else {
-        // 如果code是200/201但没有token和成功消息，可能是响应格式问题
         if (code === 200 || code === 201) {
           console.error('登录响应格式异常:', body)
           ElMessage.error(message || '登录失败：响应格式异常，请查看控制台')

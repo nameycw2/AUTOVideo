@@ -1,0 +1,1 @@
+import{s as t}from"./index-DxbvOoZF.js";const l=s=>t.get("/publish-plans",{params:s}),p=s=>t.post("/publish-plans",s),u=(s,e)=>t.put(`/publish-plans/${s}`,e),i=s=>t.delete(`/publish-plans/${s}`),o=(s,e)=>t.post(`/publish-plans/${s}/videos`,e),r=s=>t.get(`/publish-plans/${s}`),b=(s,e,n)=>t.put(`/publish-plans/${s}/videos/${e}`,n);export{o as a,b,p as c,i as d,r as e,l as g,u};

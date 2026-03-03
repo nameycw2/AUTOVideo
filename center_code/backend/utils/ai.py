@@ -17,19 +17,30 @@ from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
 def _get_openai_client():
     try:
         from openai import OpenAI, APIError
+        import httpx
     except Exception as e:
         logger.error(f"未安装 openai 依赖: {e}")
         raise RuntimeError("未安装 openai 依赖，请先 pip install openai") from e
 
-    api_key = (DEEPSEEK_API_KEY or os.environ.get("DEEPSEEK_API_KEY") or "").strip()
-    logger.info(f"获取 API Key: {'***' + api_key[-4:] if api_key and len(api_key) > 4 else 'empty'}")
-    
-    if not api_key:
-        logger.error("缺少 DEEPSEEK_API_KEY 环境变量")
-        raise RuntimeError("缺少 DEEPSEEK_API_KEY 环境变量")
+    # 临时清除代理环境变量，防止 openai/httpx 内部读取并传入 proxies 导致 __init__() 报错（httpx 0.28 已移除 proxies 参数）
+    _saved_proxy = {}
+    for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        _saved_proxy[_k] = os.environ.pop(_k, None)
 
-    base_url = (DEEPSEEK_BASE_URL or os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").strip()
-    return OpenAI(api_key=api_key, base_url=base_url), APIError
+    try:
+        api_key = (DEEPSEEK_API_KEY or os.environ.get("DEEPSEEK_API_KEY") or "").strip()
+        logger.info(f"获取 API Key: {'***' + api_key[-4:] if api_key and len(api_key) > 4 else 'empty'}")
+        if not api_key:
+            logger.error("缺少 DEEPSEEK_API_KEY 环境变量")
+            raise RuntimeError("缺少 DEEPSEEK_API_KEY 环境变量")
+
+        base_url = (DEEPSEEK_BASE_URL or os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").strip()
+        http_client = httpx.Client(trust_env=False)
+        return OpenAI(api_key=api_key, base_url=base_url, http_client=http_client), APIError
+    finally:
+        for _k, _v in _saved_proxy.items():
+            if _v is not None:
+                os.environ[_k] = _v
 
 
 def deepseek_generate_copies(

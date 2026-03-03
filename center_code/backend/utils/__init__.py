@@ -39,7 +39,11 @@ try:
     else:
         raise ImportError("utils.py not found")
 except Exception as e:
-    # 如果导入失败，创建一个占位函数
+    # 如果导入失败，创建一个占位函数（并记录原因，便于排查）
+    import logging
+    logging.getLogger(__name__).warning(
+        "backend utils.py 加载失败，使用占位实现（如 create_access_token 将返回空 token）：%s", e
+    )
     from flask import jsonify
     
     def response_success(data=None, message='success', code=200):

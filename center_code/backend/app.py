@@ -11,6 +11,14 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
+# 前端静态目录：优先 backend/static（Vite 构建输出），否则 frontend/dist
+def _frontend_dist_dir():
+    static_dir = os.path.join(current_dir, 'static')
+    if os.path.isfile(os.path.join(static_dir, 'index.html')):
+        return static_dir
+    fallback = os.path.join(os.path.dirname(current_dir), 'frontend', 'dist')
+    return fallback if os.path.isdir(fallback) else static_dir
+
 from flask import Flask, send_from_directory, request, jsonify
 from flask_cors import CORS
 
@@ -43,7 +51,7 @@ from api.editor import editor_bp
 from services.task_processor import get_task_processor
 from workers.auto_transcode_worker import maybe_start_transcode_worker
 
-app = Flask(__name__, static_folder='../frontend/dist', static_url_path='')
+app = Flask(__name__, static_folder=_frontend_dist_dir(), static_url_path='')
 
 # ==================== Session 安全配置 ====================
 # 警告：生产环境必须设置强随机 SECRET_KEY！
@@ -353,16 +361,16 @@ def init_db():
 @app.route('/')
 def index():
     """提供前端页面"""
-    return send_from_directory('../frontend/dist', 'index.html')
+    return send_from_directory(_frontend_dist_dir(), 'index.html')
 
 
 @app.route('/login-helper')
 def login_helper():
     """提供登录助手页面"""
-    return send_from_directory('../frontend/dist', 'index.html')
+    return send_from_directory(_frontend_dist_dir(), 'index.html')
 
 
-# 提供上传文件的静态路由
+# 提供上传文件的静态路由（必须在 SPA 回退之前，否则 /uploads/* 会被拦截）
 @app.route('/uploads/<path:filename>', methods=['GET', 'OPTIONS'])
 def uploaded_file(filename):
     """提供上传的文件访问"""
@@ -488,6 +496,19 @@ def health_check():
             'status': 'unhealthy',
             'error': str(e)
         }, 500
+
+
+@app.route('/<path:path>')
+def serve_spa(path):
+    """SPA 回退：未匹配到的路径返回 index.html，供前端路由处理（须在 /api/health、/uploads 之后注册）"""
+    if path.startswith('api/') or path.startswith('uploads/'):
+        from flask import abort
+        abort(404)
+    frontend_dist = _frontend_dist_dir()
+    file_path = os.path.join(frontend_dist, path.replace('/', os.sep))
+    if os.path.isfile(file_path):
+        return send_from_directory(frontend_dist, path)
+    return send_from_directory(frontend_dist, 'index.html')
 
 
 def is_port_available(port):

@@ -12,7 +12,7 @@ aiohttp==3.9.5
 
 # 若后续用FFmpeg，需安装：
 ffmpeg-python==0.2.0
-imageio-ffmpeg>=0.4.8
+imageio-ffmpeg>=0.4.9
 openai>=1.0.0
 
 # DashScope TTS SDK
@@ -29,3 +29,6 @@ alibabacloud-ice20201109>=1.0.0
 
 # 环境变量管理
 python-dotenv>=1.0.0
+
+# JWT
+PyJWT>=2.0.0

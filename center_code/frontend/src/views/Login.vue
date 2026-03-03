@@ -128,15 +128,16 @@ const handleLogin = async () => {
       ? { mode: 'code', email: form.email, code: form.code }
       : { mode: 'password', username: form.loginId, password: form.password }
     try {
-      const res = await api.auth.login(payload)
       // 兼容响应被包一层的情况（如代理返回 { data: { code, message, data, token } }）
-      // 只有当res.data包含code字段时，才说明被代理包了一层，否则直接使用res
+      // 若 res.data 含 code 则用 res.data，否则用 res
       let body = res
       if (res && res.data && typeof res.data === 'object' && res.data.code !== undefined) {
-        // res.data有code字段，说明被包了一层，使用res.data
         body = res.data
       }
-      // 否则body就是res本身（标准响应格式）
+      // 兼容 body 本身可能是 response.data 的情况
+      if (body && typeof body === 'object' && body.code === undefined && body.token === undefined && body.data && (body.data.code !== undefined || body.data.token !== undefined)) {
+        body = body.data
+      }
       
       const code = body && body.code
       const message = (body && body.message) || ''

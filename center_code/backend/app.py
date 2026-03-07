@@ -193,9 +193,15 @@ def handle_preflight():
 @app.errorhandler(Exception)
 def handle_exception(e):
     """处理所有异常，确保错误响应包含 CORS 头"""
-    from flask import make_response
+    from flask import make_response, request as flask_request
     import traceback
-    
+
+    # 非 API 路径的 404 直接返回 index.html，交给前端路由处理
+    is_404 = hasattr(e, 'code') and e.code == 404
+    is_api = flask_request.path.startswith('/api/') or flask_request.path.startswith('/uploads/')
+    if is_404 and not is_api:
+        return send_from_directory(_frontend_dist_dir(), 'index.html')
+
     # 记录错误
     error_type = type(e).__name__
     error_msg = str(e)
@@ -205,7 +211,7 @@ def handle_exception(e):
     print(f"{'='*60}")
     traceback.print_exc()
     print(f"{'='*60}\n")
-    
+
     # 确定 HTTP 状态码
     if hasattr(e, 'code'):
         status_code = e.code

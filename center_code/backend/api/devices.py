@@ -7,7 +7,7 @@ import sys
 import os
 import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import response_success, response_error
+from utils import response_success, response_error, has_valid_token, get_current_user_obj, get_visible_user_ids
 from models import Device
 from db import get_db
 
@@ -126,47 +126,34 @@ def register_device():
 def get_devices():
     """
     获取设备列表接口
-    
+
     请求方法: GET
     路径: /api/devices
-    认证: 不需要
-    
-    查询参数: 无
-    
+    认证: 需要登录（管理端）
+
     返回数据:
-        成功 (200):
-        {
-            "code": 200,
-            "message": "success",
-            "data": [
-                {
-                    "id": int,
-                    "device_id": "string",
-                    "device_name": "string",
-                    "ip_address": "string",
-                    "status": "string",
-                    "last_heartbeat": "string",
-                    "created_at": "string",
-                    "updated_at": "string"
-                }
-            ]
-        }
-    
-    说明:
-        - 自动检查设备是否离线（超过60秒未心跳的设备会被标记为 offline）
-        - 返回所有设备信息
-        - 支持数据库连接重试机制，解决启动时连接未就绪的问题
+        成功 (200): 设备列表（按当前用户可见范围过滤）
     """
-    # 数据库连接重试机制（最多重试3次，每次间隔0.5秒）
+    if not has_valid_token():
+        return response_error('请先登录', 401)
+
+    current_user = get_current_user_obj()
+    if not current_user:
+        return response_error('请先登录', 401)
+    visible_ids = get_visible_user_ids(current_user)
+
     max_retries = 3
     retry_delay = 0.5
     last_error = None
-    
+
     for attempt in range(max_retries):
         try:
             with get_db() as db:
-                devices = db.query(Device).all()
-                
+                query = db.query(Device)
+                if visible_ids is not None:
+                    query = query.filter(Device.user_id.in_(visible_ids))
+                devices = query.all()
+
                 # 检查设备是否离线（超过60秒未心跳）
                 now = datetime.now()
                 for device in devices:
@@ -176,7 +163,7 @@ def get_devices():
                             device.status = 'offline'
                             device.updated_at = datetime.now()
                             db.commit()
-                
+
                 devices_list = []
                 for device in devices:
                     devices_list.append({
@@ -189,20 +176,17 @@ def get_devices():
                         'created_at': device.created_at.isoformat() if device.created_at else None,
                         'updated_at': device.updated_at.isoformat() if device.updated_at else None
                     })
-            
+
             return response_success(devices_list)
         except Exception as e:
             last_error = e
-            # 如果是数据库连接错误，进行重试
             error_str = str(e).lower()
             if any(keyword in error_str for keyword in ['connection', 'timeout', 'lost', 'closed', 'operational']):
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                     continue
-            # 其他错误直接返回
             return response_error(str(e), 500)
-    
-    # 如果所有重试都失败，返回错误
+
     return response_error(f'Database connection failed after {max_retries} attempts: {str(last_error)}', 500)
 
 

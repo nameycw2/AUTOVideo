@@ -204,3 +204,24 @@ def model_to_dict(model):
 def models_to_list(models):
     """将SQLAlchemy模型列表转换为字典列表"""
     return [model_to_dict(model) for model in models]
+
+
+def get_visible_user_ids(current_user):
+    """
+    返回当前用户有权查看数据的用户ID列表。
+    - super_admin: 返回 None（表示不过滤，查看所有）
+    - parent: 返回 [self.id] + 所有子账号ID
+    - child: 返回 [self.id]
+    """
+    from models import User, USER_ROLE_SUPER_ADMIN, USER_ROLE_PARENT
+    if current_user.role == USER_ROLE_SUPER_ADMIN:
+        return None  # None 表示不限制
+    if current_user.role == USER_ROLE_PARENT:
+        try:
+            with get_db() as db:
+                children = db.query(User.id).filter(User.parent_id == current_user.id).all()
+                child_ids = [c.id for c in children]
+                return [current_user.id] + child_ids
+        except Exception:
+            return [current_user.id]
+    return [current_user.id]

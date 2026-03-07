@@ -89,24 +89,26 @@ class EmailVerification(Base):
 class Device(Base):
     """设备表"""
     __tablename__ = 'devices'
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     device_id = Column(String(255), unique=True, nullable=False, index=True)
     device_name = Column(String(255))
     ip_address = Column(String(50))
     status = Column(String(50), default='offline')
     last_heartbeat = Column(DateTime)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
     created_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now())
-    updated_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now(), 
+    updated_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now(),
                        onupdate=lambda: __import__('datetime').datetime.now())
 
 
 class Account(Base):
     """账号表"""
     __tablename__ = 'accounts'
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     device_id = Column(Integer, ForeignKey('devices.id'), nullable=False)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
     account_name = Column(String(255), nullable=False, index=True)
     platform = Column(String(50), default='douyin')
     cookie_file_path = Column(String(500))
@@ -191,8 +193,9 @@ class Message(Base):
 class PublishPlan(Base):
     """发布计划表"""
     __tablename__ = 'publish_plans'
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
     plan_name = Column(String(255), nullable=False)
     platform = Column(String(50), default='douyin')
     merchant_id = Column(Integer, ForeignKey('merchants.id'), nullable=True)
@@ -229,9 +232,10 @@ class PlanVideo(Base):
 class Merchant(Base):
     """商家表"""
     __tablename__ = 'merchants'
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
-    merchant_name = Column(String(255), nullable=False, unique=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
+    merchant_name = Column(String(255), nullable=False)
     contact_person = Column(String(100))
     contact_phone = Column(String(50))
     contact_email = Column(String(100))
@@ -282,8 +286,9 @@ class AccountStats(Base):
 class Material(Base):
     """素材表（视频/音频素材）"""
     __tablename__ = 'materials'
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)  # NULL=公共素材（管理员提供）
     name = Column(String(255), nullable=False)  # 文件名
     status = Column(String(50), default='ready')  # ready/processing/failed
     path = Column(String(500), nullable=True)  # 当前可用的文件路径（相对 BASE_DIR）

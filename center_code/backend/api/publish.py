@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from werkzeug.utils import secure_filename
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import response_success, response_error, login_required
+from utils import response_success, response_error, login_required, get_current_user_obj, get_visible_user_ids
 from models import VideoTask, Account, VideoLibrary
 from db import get_db
 from services.task_executor import execute_video_upload
@@ -312,10 +312,18 @@ def submit_publish():
             if final_thumbnail_url:
                 final_thumbnail_url = _refresh_cos_url_if_needed(final_thumbnail_url)
             
-            # 2. 验证所有账号是否存在，并获取账号信息
+            # 2. 验证所有账号是否存在，并验证归属权
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
             accounts = []
             for account_id in account_ids:
-                account = db.query(Account).filter(Account.id == account_id).first()
+                query = db.query(Account).filter(Account.id == account_id)
+                if visible_ids is not None:
+                    query = query.filter(Account.user_id.in_(visible_ids))
+                account = query.first()
                 if not account:
                     return response_error(f'Account {account_id} not found', 404)
                 # 检查账号是否有cookies（已登录）
@@ -456,8 +464,15 @@ def get_publish_history():
         status = data.get('status')
         
         with get_db() as db:
-            # 查询视频任务，关联账号信息
+            # 查询视频任务，关联账号信息，按可见范围过滤
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
             query = db.query(VideoTask, Account).join(Account, VideoTask.account_id == Account.id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
             
             if account_id:
                 query = query.filter(VideoTask.account_id == account_id)

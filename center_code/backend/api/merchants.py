@@ -6,7 +6,7 @@ from datetime import datetime
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import response_success, response_error, login_required
+from utils import response_success, response_error, login_required, get_current_user_obj, get_visible_user_ids
 from models import Merchant
 from db import get_db
 
@@ -62,9 +62,16 @@ def get_merchants():
         status = request.args.get('status')
         limit = request.args.get('limit', type=int, default=50)
         offset = request.args.get('offset', type=int, default=0)
-        
+
+        current_user = get_current_user_obj()
+        if not current_user:
+            return response_error('请先登录', 401)
+        visible_ids = get_visible_user_ids(current_user)
+
         with get_db() as db:
             query = db.query(Merchant)
+            if visible_ids is not None:
+                query = query.filter(Merchant.user_id.in_(visible_ids))
             
             if search:
                 query = query.filter(Merchant.merchant_name.like(f'%{search}%'))
@@ -147,12 +154,21 @@ def create_merchant():
             return response_error('merchant_name is required', 400)
         
         with get_db() as db:
-            # 检查商家名称是否已存在
-            existing = db.query(Merchant).filter(Merchant.merchant_name == merchant_name).first()
+            # 检查商家名称是否已存在（仅在当前用户范围内）
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(Merchant).filter(Merchant.merchant_name == merchant_name)
+            if visible_ids is not None:
+                query = query.filter(Merchant.user_id.in_(visible_ids))
+            existing = query.first()
             if existing:
                 return response_error('Merchant name already exists', 400)
-            
+
             merchant = Merchant(
+                user_id=current_user.id,
                 merchant_name=merchant_name,
                 contact_person=data.get('contact_person'),
                 contact_phone=data.get('contact_phone'),
@@ -214,11 +230,19 @@ def get_merchant(merchant_id):
     """
     try:
         with get_db() as db:
-            merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(Merchant).filter(Merchant.id == merchant_id)
+            if visible_ids is not None:
+                query = query.filter(Merchant.user_id.in_(visible_ids))
+            merchant = query.first()
+
             if not merchant:
                 return response_error('Merchant not found', 404)
-            
+
             return response_success({
                 'id': merchant.id,
                 'merchant_name': merchant.merchant_name,
@@ -281,8 +305,16 @@ def update_merchant(merchant_id):
     try:
         data = request.json
         with get_db() as db:
-            merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(Merchant).filter(Merchant.id == merchant_id)
+            if visible_ids is not None:
+                query = query.filter(Merchant.user_id.in_(visible_ids))
+            merchant = query.first()
+
             if not merchant:
                 return response_error('Merchant not found', 404)
             
@@ -346,14 +378,22 @@ def delete_merchant(merchant_id):
     """
     try:
         with get_db() as db:
-            merchant = db.query(Merchant).filter(Merchant.id == merchant_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(Merchant).filter(Merchant.id == merchant_id)
+            if visible_ids is not None:
+                query = query.filter(Merchant.user_id.in_(visible_ids))
+            merchant = query.first()
+
             if not merchant:
                 return response_error('Merchant not found', 404)
-            
+
             db.delete(merchant)
             db.commit()
-            
+
             return response_success({'merchant_id': merchant_id}, 'Merchant deleted')
     except Exception as e:
         return response_error(str(e), 500)

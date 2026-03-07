@@ -9,7 +9,7 @@ import json
 import time
 from urllib.parse import urlparse
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import response_success, response_error, login_required, decode_access_token
+from utils import response_success, response_error, login_required, decode_access_token, get_current_user_obj, get_visible_user_ids
 from models import PublishPlan, PlanVideo, Merchant, VideoTask
 from db import get_db
 
@@ -190,9 +190,16 @@ def get_publish_plans():
         status = request.args.get('status')
         limit = request.args.get('limit', type=int, default=20)
         offset = request.args.get('offset', type=int, default=0)
-        
+
+        current_user = get_current_user_obj()
+        if not current_user:
+            return response_error('请先登录', 401)
+        visible_ids = get_visible_user_ids(current_user)
+
         with get_db() as db:
             query = db.query(PublishPlan)
+            if visible_ids is not None:
+                query = query.filter(PublishPlan.user_id.in_(visible_ids))
             
             if platform:
                 query = query.filter(PublishPlan.platform == platform)
@@ -322,7 +329,12 @@ def create_publish_plan():
                 return response_error(f'Invalid account_ids format: {e}', 400)
         
         with get_db() as db:
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+
             plan = PublishPlan(
+                user_id=current_user.id,
                 plan_name=plan_name,
                 platform=platform,
                 merchant_id=merchant_id,
@@ -404,11 +416,19 @@ def get_publish_plan(plan_id):
     """
     try:
         with get_db() as db:
-            plan = db.query(PublishPlan).filter(PublishPlan.id == plan_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(PublishPlan).filter(PublishPlan.id == plan_id)
+            if visible_ids is not None:
+                query = query.filter(PublishPlan.user_id.in_(visible_ids))
+            plan = query.first()
+
             if not plan:
                 return response_error('Publish plan not found', 404)
-            
+
             # 获取关联的商家
             merchant_name = None
             if plan.merchant_id:
@@ -506,11 +526,19 @@ def update_publish_plan(plan_id):
     try:
         data = request.json
         with get_db() as db:
-            plan = db.query(PublishPlan).filter(PublishPlan.id == plan_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(PublishPlan).filter(PublishPlan.id == plan_id)
+            if visible_ids is not None:
+                query = query.filter(PublishPlan.user_id.in_(visible_ids))
+            plan = query.first()
+
             if not plan:
                 return response_error('Publish plan not found', 404)
-            
+
             if 'plan_name' in data:
                 plan.plan_name = data['plan_name']
             if 'status' in data:
@@ -588,11 +616,19 @@ def delete_publish_plan(plan_id):
     """
     try:
         with get_db() as db:
-            plan = db.query(PublishPlan).filter(PublishPlan.id == plan_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(PublishPlan).filter(PublishPlan.id == plan_id)
+            if visible_ids is not None:
+                query = query.filter(PublishPlan.user_id.in_(visible_ids))
+            plan = query.first()
+
             if not plan:
                 return response_error('Publish plan not found', 404)
-            
+
             # 先查出关联的视频，用于删除对应的视频任务
             videos = db.query(PlanVideo).filter(PlanVideo.plan_id == plan_id).all()
             video_urls = [v.video_url for v in videos if v.video_url]
@@ -654,11 +690,19 @@ def execute_publish_plan(plan_id):
     """
     try:
         with get_db() as db:
-            plan = db.query(PublishPlan).filter(PublishPlan.id == plan_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(PublishPlan).filter(PublishPlan.id == plan_id)
+            if visible_ids is not None:
+                query = query.filter(PublishPlan.user_id.in_(visible_ids))
+            plan = query.first()
+
             if not plan:
                 return response_error('发布计划不存在', 404)
-            
+
             if plan.status != 'pending':
                 return response_error(f'只有待发布状态的计划可以执行，当前状态: {plan.status}', 400)
             
@@ -753,24 +797,31 @@ def add_video_to_plan(plan_id):
         data = request.json
         video_url = data.get('video_url')
         video_title = data.get('video_title')
-        video_description = data.get('video_description')  # 视频正文/描述
-        video_tags = data.get('video_tags')  # 视频标签/话题，可以是字符串（逗号分隔）或列表
+        video_description = data.get('video_description')
+        video_tags = data.get('video_tags')
         thumbnail_url = data.get('thumbnail_url')
         publish_time = data.get('publish_time')
-        
+
         if not video_url:
             return response_error('video_url is required', 400)
-        
-        # 处理 video_tags：如果是列表，转换为逗号分隔的字符串；如果是字符串，直接使用
+
         video_tags_str = None
         if video_tags:
             if isinstance(video_tags, list):
                 video_tags_str = ','.join([str(tag).strip() for tag in video_tags if tag])
             elif isinstance(video_tags, str):
                 video_tags_str = video_tags.strip()
-        
+
         with get_db() as db:
-            plan = db.query(PublishPlan).filter(PublishPlan.id == plan_id).first()
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(PublishPlan).filter(PublishPlan.id == plan_id)
+            if visible_ids is not None:
+                query = query.filter(PublishPlan.user_id.in_(visible_ids))
+            plan = query.first()
             if not plan:
                 return response_error('Publish plan not found', 404)
             
@@ -910,10 +961,18 @@ def update_plan_video(plan_id, video_id):
     try:
         data = request.json or {}
         with get_db() as db:
-            plan = db.query(PublishPlan).filter(PublishPlan.id == plan_id).first()
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(PublishPlan).filter(PublishPlan.id == plan_id)
+            if visible_ids is not None:
+                query = query.filter(PublishPlan.user_id.in_(visible_ids))
+            plan = query.first()
             if not plan:
                 return response_error('Publish plan not found', 404)
-            
+
             video = db.query(PlanVideo).filter(
                 PlanVideo.id == video_id,
                 PlanVideo.plan_id == plan_id
@@ -1016,14 +1075,20 @@ def get_plan_videos_history():
         offset = request.args.get('offset', type=int, default=0)
         plan_id_filter = request.args.get('plan_id', type=int)
         status_filter = request.args.get('status')
-        
+
+        current_user = get_current_user_obj()
+        if not current_user:
+            return response_error('请先登录', 401)
+        visible_ids = get_visible_user_ids(current_user)
+
         with get_db() as db:
             from models import Account
-            
-            # 查询 PlanVideo，关联 PublishPlan 和 VideoTask
+
             query = db.query(PlanVideo, PublishPlan).join(
                 PublishPlan, PlanVideo.plan_id == PublishPlan.id
             )
+            if visible_ids is not None:
+                query = query.filter(PublishPlan.user_id.in_(visible_ids))
             
             if plan_id_filter:
                 query = query.filter(PlanVideo.plan_id == plan_id_filter)

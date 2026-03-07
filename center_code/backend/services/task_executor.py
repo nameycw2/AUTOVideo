@@ -10,12 +10,13 @@ import tempfile
 import threading
 import requests
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from datetime import datetime
 from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_
 
 from models import Account, VideoTask, ChatTask, ListenTask, Message
 from db import get_db
@@ -63,6 +64,511 @@ PLATFORM_TAG_LIMITS = {
     'tiktok': 10,
     'kuaishou': 10,
 }
+
+
+def _build_chromium_launch_kwargs() -> Dict:
+    """
+    Unified browser launch options:
+    - Disable credential/password save prompts that can block page actions.
+    - Keep behavior consistent for publish flow and post-publish actions.
+    """
+    args = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-notifications",
+        "--disable-save-password-bubble",
+        "--password-store=basic",
+        "--disable-features=PasswordManagerEnableService,PasswordManagerOnboarding,AutofillServerCommunication",
+    ]
+    kwargs: Dict = {"headless": LOCAL_CHROME_HEADLESS, "args": args}
+    if LOCAL_CHROME_PATH:
+        kwargs["executable_path"] = LOCAL_CHROME_PATH
+    return kwargs
+
+
+def _parse_after_publish_actions(raw_value) -> List[str]:
+    if not raw_value:
+        return []
+    if isinstance(raw_value, list):
+        return [str(x).strip() for x in raw_value if str(x).strip()]
+    if isinstance(raw_value, str):
+        try:
+            v = json.loads(raw_value)
+            if isinstance(v, list):
+                return [str(x).strip() for x in v if str(x).strip()]
+        except Exception:
+            pass
+    return []
+
+
+async def _extract_latest_douyin_video_url(account_file: str) -> Optional[str]:
+    """Best-effort: open profile page and get latest /video/ URL."""
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(**_build_chromium_launch_kwargs())
+            context = await browser.new_context(storage_state=account_file)
+            page = await context.new_page()
+            await page.goto("https://www.douyin.com/user/self?showTab=post", wait_until="domcontentloaded")
+            await page.wait_for_timeout(5000)
+            url = await page.evaluate(
+                """() => {
+                    const a = document.querySelector('a[href*="/video/"]');
+                    if (!a) return '';
+                    const href = a.getAttribute('href') || '';
+                    if (!href) return '';
+                    if (href.startsWith('http')) return href;
+                    return 'https://www.douyin.com' + href;
+                }"""
+            )
+            await context.close()
+            await browser.close()
+            return url or None
+    except Exception:
+        return None
+
+
+async def _run_douyin_post_actions(account_file: str, video_url: str, actions: List[str], comment_text: str) -> Dict:
+    """Best-effort execute auto like/share/comment on douyin video page."""
+    result = {"video_url": video_url, "actions": {}, "success": False}
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(**_build_chromium_launch_kwargs())
+            context = await browser.new_context(storage_state=account_file)
+            page = await context.new_page()
+            await page.goto(video_url, wait_until="domcontentloaded")
+            await page.wait_for_timeout(4000)
+
+            if "auto_like" in actions:
+                ok = False
+                for sel in [
+                    'button[aria-label*="点赞"]',
+                    '[data-e2e="like-icon"]',
+                    'div[aria-label*="点赞"]',
+                ]:
+                    try:
+                        node = page.locator(sel).first
+                        if await node.count():
+                            await node.click(timeout=1500)
+                            ok = True
+                            break
+                    except Exception:
+                        pass
+                result["actions"]["auto_like"] = ok
+
+            if "auto_share" in actions:
+                ok = False
+                for sel in [
+                    'button[aria-label*="分享"]',
+                    '[data-e2e="share-icon"]',
+                    'div[aria-label*="分享"]',
+                ]:
+                    try:
+                        node = page.locator(sel).first
+                        if await node.count():
+                            await node.click(timeout=1500)
+                            ok = True
+                            break
+                    except Exception:
+                        pass
+                result["actions"]["auto_share"] = ok
+
+            if "auto_comment" in actions:
+                ok = False
+                text = (comment_text or "发布完成，欢迎交流。").strip()[:200]
+                for sel in [
+                    'textarea[placeholder*="评论"]',
+                    'textarea',
+                    'div[contenteditable="true"]',
+                ]:
+                    try:
+                        node = page.locator(sel).first
+                        if await node.count():
+                            await node.click(timeout=1500)
+                            await node.fill(text, timeout=2000)
+                            await page.keyboard.press("Enter")
+                            ok = True
+                            break
+                    except Exception:
+                        pass
+                result["actions"]["auto_comment"] = ok
+
+            await context.close()
+            await browser.close()
+            result["success"] = any(bool(v) for v in result["actions"].values()) if actions else True
+            return result
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+
+
+async def _execute_after_publish_actions(
+    task: VideoTask,
+    account_file: str,
+    platform: str,
+    preferred_video_url: Optional[str] = None,
+) -> Dict:
+    actions = _parse_after_publish_actions(getattr(task, "after_publish_actions", None))
+    if not actions:
+        return {"enabled": False, "actions": {}, "success": True}
+
+    platform = (platform or "").lower()
+    if platform != "douyin":
+        return {
+            "enabled": True,
+            "platform": platform,
+            "actions": {k: False for k in actions},
+            "success": False,
+            "error": f"platform_not_supported: {platform}",
+        }
+
+    target_url = (preferred_video_url or "").strip()
+    if not target_url:
+        target_url = await _extract_latest_douyin_video_url(account_file) or ""
+    if not target_url:
+        return {
+            "enabled": True,
+            "platform": platform,
+            "actions": {k: False for k in actions},
+            "success": False,
+            "error": "latest_video_url_not_found",
+        }
+
+    comment_text = getattr(task, "after_publish_comment", None) or (task.video_description or "")
+    return await _run_douyin_post_actions_v2(account_file, target_url, actions, comment_text)
+
+
+async def _run_douyin_post_actions_v2(account_file: str, video_url: str, actions: List[str], comment_text: str) -> Dict:
+    """More robust action executor for douyin video page."""
+    result = {"video_url": video_url, "actions": {}, "success": False, "debug": []}
+
+    async def _click_by_selectors(page, selectors):
+        for sel in selectors:
+            try:
+                node = page.locator(sel).first
+                if await node.count():
+                    await node.click(timeout=2000)
+                    return True
+            except Exception:
+                pass
+        return False
+
+    async def _click_by_text(page, text):
+        try:
+            return await page.evaluate(
+                """(targetText) => {
+                    const nodes = Array.from(document.querySelectorAll('button, div[role="button"], span, i'));
+                    for (const n of nodes) {
+                        const t = (n.innerText || n.textContent || '').trim();
+                        if (t.includes(targetText)) {
+                            n.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                text
+            )
+        except Exception:
+            return False
+
+    async def _click_semantic(page, keywords, selectors=None):
+        selectors = selectors or []
+        if await _click_by_selectors(page, selectors):
+            return True
+        try:
+            return bool(await page.evaluate(
+                """(payload) => {
+                    const { keywords } = payload;
+                    const nodes = Array.from(document.querySelectorAll('button, a, div, span, i, svg, p'));
+                    const normalize = (s) => (s || '').toLowerCase().replace(/\\s+/g, '');
+                    const isVisible = (el) => {
+                        const r = el.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    };
+                    const hit = (el) => {
+                        const text = normalize(el.innerText || el.textContent || '');
+                        const aria = normalize(el.getAttribute('aria-label'));
+                        const title = normalize(el.getAttribute('title'));
+                        const cls = normalize(el.className && String(el.className));
+                        const bag = [text, aria, title, cls].join('|');
+                        return keywords.some(k => bag.includes(normalize(k)));
+                    };
+                    const findClickable = (el) => {
+                        let cur = el;
+                        for (let i = 0; i < 6 && cur; i++) {
+                            const role = (cur.getAttribute && cur.getAttribute('role')) || '';
+                            const cls = (cur.className && String(cur.className)) || '';
+                            const onclick = !!cur.onclick;
+                            if (
+                                ['BUTTON', 'A'].includes(cur.tagName) ||
+                                role.toLowerCase() === 'button' ||
+                                onclick ||
+                                /btn|button|action|icon|click/i.test(cls)
+                            ) {
+                                return cur;
+                            }
+                            cur = cur.parentElement;
+                        }
+                        return el;
+                    };
+                    for (const n of nodes) {
+                        if (!isVisible(n)) continue;
+                        if (!hit(n)) continue;
+                        const target = findClickable(n);
+                        target.click();
+                        return true;
+                    }
+                    return false;
+                }""",
+                {"keywords": keywords},
+            ))
+        except Exception:
+            return False
+
+    async def _contains_page_text(page, text: str) -> bool:
+        try:
+            return bool(await page.evaluate(
+                """(target) => (document.body?.innerText || '').includes(target)""",
+                text
+            ))
+        except Exception:
+            return False
+
+    async def _detect_like_active(page):
+        try:
+            return await page.evaluate(
+                """() => {
+                    const selectors = [
+                        '[data-e2e*="like"][class*="active"]',
+                        '[data-e2e*="digg"][class*="active"]',
+                        '[aria-pressed="true"][aria-label*="赞"]',
+                        '[class*="like"][class*="active"]',
+                        '[class*="digg"][class*="active"]'
+                    ];
+                    for (const s of selectors) {
+                        const n = document.querySelector(s);
+                        if (n) return true;
+                    }
+                    const text = (document.body?.innerText || '');
+                    return text.includes('已赞');
+                }"""
+            )
+        except Exception:
+            return None
+
+    async def _dismiss_blocking_dialogs(page):
+        # 常见遮挡弹窗按钮文案（自动保存登录信息/确认类）
+        candidates = [
+            "\u81ea\u52a8\u4fdd\u5b58\u767b\u5f55\u4fe1\u606f",
+            "\u4fdd\u5b58\u767b\u5f55\u4fe1\u606f",
+            "\u4fdd\u5b58",
+            "\u53d6\u6d88",
+            "\u786e\u5b9a",
+            "\u786e\u8ba4",
+            "\u6211\u77e5\u9053\u4e86",
+            "\u540c\u610f",
+            "\u6682\u4e0d",
+            "\u7a0d\u540e\u518d\u8bf4",
+            "\u4ee5\u540e\u518d\u8bf4",
+            "\u4e0b\u6b21\u518d\u8bf4",
+        ]
+        for _ in range(3):
+            dismissed = False
+            for text in candidates:
+                try:
+                    btn = page.get_by_role("button", name=text).first
+                    if await btn.count():
+                        await btn.click(timeout=1200)
+                        dismissed = True
+                        await page.wait_for_timeout(500)
+                except Exception:
+                    pass
+                try:
+                    ok = await _click_by_text(page, text)
+                    if ok:
+                        dismissed = True
+                        await page.wait_for_timeout(500)
+                except Exception:
+                    pass
+            if not dismissed:
+                break
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(**_build_chromium_launch_kwargs())
+            context = await browser.new_context(storage_state=account_file)
+            page = await context.new_page()
+            await page.goto(video_url, wait_until="domcontentloaded")
+            await page.wait_for_timeout(5000)
+            try:
+                await page.wait_for_function(
+                    """() => {
+                        const t = (document.body?.innerText || '');
+                        return t.includes('赞') || t.includes('分享') || t.includes('抢首评') || t.includes('评论');
+                    }""",
+                    timeout=8000
+                )
+            except Exception:
+                pass
+            await _dismiss_blocking_dialogs(page)
+            result["debug"].append("page_loaded")
+
+            if "auto_like" in actions:
+                ok = False
+                before_like_state = await _detect_like_active(page)
+                for _ in range(2):
+                    ok = await _click_semantic(page, ["点赞", "赞", "like", "digg"], [
+                        '[data-e2e*="like"]',
+                        '[data-e2e="like-icon"]',
+                        'button[aria-label*="\\u70b9\\u8d5e"]',
+                        'div[aria-label*="\\u70b9\\u8d5e"]',
+                    ])
+                    if not ok:
+                        ok = await _click_by_text(page, "\u8d5e")
+                    await page.wait_for_timeout(900)
+                    after_like_state = await _detect_like_active(page)
+                    if before_like_state is True and after_like_state is True:
+                        ok = True
+                        break
+                    if before_like_state is not None and after_like_state is not None and before_like_state != after_like_state:
+                        ok = True
+                        break
+                    if ok:
+                        # 最后兜底：若无法可靠检测状态变化，但至少检测到“已赞”文本也算成功
+                        ok = await _contains_page_text(page, "已赞") or ok
+                        if ok:
+                            break
+                    await _dismiss_blocking_dialogs(page)
+                    await page.wait_for_timeout(600)
+                result["actions"]["auto_like"] = bool(ok)
+                result["debug"].append(f"auto_like={bool(ok)}")
+                await page.wait_for_timeout(800)
+                await _dismiss_blocking_dialogs(page)
+
+            if "auto_share" in actions:
+                ok = False
+                for _ in range(2):
+                    ok = await _click_semantic(page, ["分享", "share"], [
+                        '[data-e2e*="share"]',
+                        '[data-e2e="share-icon"]',
+                        'button[aria-label*="\\u5206\\u4eab"]',
+                        'div[aria-label*="\\u5206\\u4eab"]',
+                    ])
+                    if not ok:
+                        ok = await _click_by_text(page, "\u5206\u4eab")
+                    if ok:
+                        break
+                    await _dismiss_blocking_dialogs(page)
+                    await page.wait_for_timeout(600)
+                # 打开分享面板后，尽量完成一次实际分享动作（优先复制链接）
+                if ok:
+                    await page.wait_for_timeout(600)
+                    done_share = await _click_semantic(page, ["复制链接", "copy link"], [
+                        '[data-e2e*="copy"]',
+                        'button:has-text("\\u590d\\u5236\\u94fe\\u63a5")',
+                        'div[role="button"]:has-text("\\u590d\\u5236\\u94fe\\u63a5")',
+                    ])
+                    if done_share:
+                        await page.wait_for_timeout(700)
+                        done_share = await _contains_page_text(page, "复制成功") or await _contains_page_text(page, "已复制") or done_share
+                        ok = True
+                    else:
+                        ok = False
+                result["actions"]["auto_share"] = bool(ok)
+                result["debug"].append(f"auto_share={bool(ok)}")
+                await page.wait_for_timeout(800)
+                await _dismiss_blocking_dialogs(page)
+
+            if "auto_comment" in actions:
+                ok = False
+                text = (comment_text or "\u53d1\u5e03\u5b8c\u6210\uff0c\u6b22\u8fce\u4ea4\u6d41\u3002").strip()[:200]
+                try:
+                    await _click_semantic(page, ["评论", "抢首评", "首评", "comment"], [
+                        '[data-e2e*="comment"]',
+                        'button[aria-label*="\\u8bc4\\u8bba"]',
+                        'div[aria-label*="\\u8bc4\\u8bba"]',
+                    ])
+                    await page.wait_for_timeout(500)
+                    box = page.locator('textarea[placeholder*="\\u8bc4\\u8bba"], textarea').first
+                    if await box.count():
+                        await box.click(timeout=2000)
+                        await box.fill(text, timeout=3000)
+                        submit_ok = await _click_by_selectors(page, [
+                            '[data-e2e*="comment-submit"]',
+                            'button:has-text("\\u53d1\\u5e03")',
+                            'button:has-text("\\u53d1\\u9001")',
+                            'button:has-text("\\u8bc4\\u8bba")',
+                        ])
+                        if not submit_ok:
+                            await page.keyboard.press("Enter")
+                        ok = True
+                except Exception:
+                    pass
+                if not ok:
+                    try:
+                        editable = page.locator('div[contenteditable="true"]').first
+                        if await editable.count():
+                            await editable.click(timeout=2000)
+                            await page.keyboard.type(text, delay=20)
+                            submit_ok = await _click_by_selectors(page, [
+                                '[data-e2e*="comment-submit"]',
+                                'button:has-text("\\u53d1\\u5e03")',
+                                'button:has-text("\\u53d1\\u9001")',
+                                'button:has-text("\\u8bc4\\u8bba")',
+                            ])
+                            if not submit_ok:
+                                await page.keyboard.press("Enter")
+                            ok = True
+                    except Exception:
+                        pass
+                if not ok:
+                    try:
+                        ok = bool(await page.evaluate(
+                            """(text) => {
+                                const ta = document.querySelector('textarea');
+                                if (ta) {
+                                    ta.value = text;
+                                    ta.dispatchEvent(new Event('input', { bubbles: true }));
+                                }
+                                const editable = document.querySelector('div[contenteditable="true"]');
+                                if (!ta && editable) {
+                                    editable.focus();
+                                    editable.textContent = text;
+                                    editable.dispatchEvent(new Event('input', { bubbles: true }));
+                                }
+                                const nodes = Array.from(document.querySelectorAll('button, div[role="button"], span'));
+                                for (const n of nodes) {
+                                    const t = (n.innerText || n.textContent || '').trim();
+                                if (t.includes('发布') || t.includes('发送') || t.includes('评论')) {
+                                    n.click();
+                                    return true;
+                                }
+                            }
+                            return !!(ta || editable);
+                            }""",
+                            text
+                        ))
+                    except Exception:
+                        pass
+                if ok:
+                    await page.wait_for_timeout(1200)
+                    short_text = text[:10]
+                    ok = (
+                        await _contains_page_text(page, short_text)
+                        or await _contains_page_text(page, "评论成功")
+                        or await _contains_page_text(page, "发送成功")
+                        or await _contains_page_text(page, "审核")
+                    )
+                result["actions"]["auto_comment"] = bool(ok)
+                result["debug"].append(f"auto_comment={bool(ok)}")
+                await _dismiss_blocking_dialogs(page)
+
+            await context.close()
+            await browser.close()
+            result["success"] = all(bool(v) for v in result["actions"].values()) if actions else True
+            return result
+    except Exception as e:
+        result["error"] = str(e)
+        return result
 
 
 def get_account_from_db(account_id: int, db: Session) -> Optional[Dict]:
@@ -258,6 +764,29 @@ async def execute_video_upload(task_id: int):
         
         # 更新任务状态为处理中，并设置 started_at
         # 如果状态已经是 uploading，说明是任务处理器设置的，现在设置 started_at 表示真正开始执行
+        claim_time = datetime.now()
+        claimed = db.query(VideoTask).filter(
+            VideoTask.id == task_id,
+            or_(
+                VideoTask.status == 'pending',
+                and_(VideoTask.status == 'uploading', VideoTask.started_at.is_(None))
+            )
+        ).update(
+            {
+                VideoTask.status: 'uploading',
+                VideoTask.started_at: claim_time,
+                VideoTask.progress: 0,
+            },
+            synchronize_session=False
+        )
+        db.commit()
+        if claimed == 0:
+            db.refresh(task)
+            if douyin_logger:
+                douyin_logger.info(f"Video task {task_id} already claimed by another worker (status={task.status})")
+            return
+        task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
+
         if task.status != 'uploading':
             task.status = 'uploading'
         task.started_at = datetime.now()
@@ -455,8 +984,8 @@ async def execute_video_upload(task_id: int):
                             
                             # 尝试刷新COS URL
                             try:
-                                from blueprints.video_library import _refresh_cos_url_if_needed, _extract_cos_key_from_url
-                                cos_key = _extract_cos_key_from_url(current_url)
+                                parsed_url = urlparse(current_url)
+                                cos_key = parsed_url.path.lstrip('/') if parsed_url.path else None
                                 if cos_key:
                                     from utils.cos_service import get_file_url
                                     new_url = get_file_url(cos_key, use_presigned=True, expires_in=86400)
@@ -587,6 +1116,7 @@ async def execute_video_upload(task_id: int):
                 if douyin_logger:
                     douyin_logger.info(f"快手任务 {task_id} 已获取上传锁，开始执行（多账号串行）")
             try:
+                is_plan_task = bool(getattr(task, "plan_video_id", None))
                 updated_cookies = await execute_upload(
                     task.video_title or '',
                     video_path,  # 使用处理后的路径
@@ -596,7 +1126,8 @@ async def execute_video_upload(task_id: int):
                     thumbnail_path_to_use if thumbnail_path_to_use else None,  # 使用本地路径，避免 URL 导致上传器失败
                     task.account_id,
                     platform=platform,
-                    description=task.video_description or ''
+                    description=task.video_description or '',
+                    collect_published_url=not is_plan_task
                 )
             finally:
                 if platform == 'xiaohongshu':
@@ -645,7 +1176,10 @@ async def execute_video_upload(task_id: int):
                 return
 
             # 超时保护：若任务已被超时规则标记为 failed，则不再回写 completed/published
-            if task.status == 'failed' and task.error_message and '45秒' in task.error_message:
+            if task.status == 'failed' and task.error_message and (
+                'timeout' in task.error_message.lower() or
+                '超时' in task.error_message
+            ):
                 print(f"[TASK STATUS] 任务 {task_id} 已被超时规则标记失败，跳过成功回写")
                 if douyin_logger:
                     douyin_logger.warning(f"Task {task_id} timed out by scheduler, skip success write-back")
@@ -661,14 +1195,20 @@ async def execute_video_upload(task_id: int):
             # 更新cookies到数据库
             # updated_cookies 可能是 cookies 字典，也可能是 {"upload_success": True} 标记
             cookies_updated = False
+            preferred_video_url = None
             if updated_cookies:
                 # 检查是否是有效的cookies格式（包含cookies或origins字段）
                 if isinstance(updated_cookies, dict):
+                    preferred_video_url = updated_cookies.get('published_video_url')
                     if 'cookies' in updated_cookies or 'origins' in updated_cookies:
                         # 这是有效的cookies格式
                         if douyin_logger:
                             douyin_logger.info(f"更新账号 {task.account_id} 的 cookies 到数据库...")
-                        save_cookies_to_db(task.account_id, updated_cookies, db)
+                        cookies_payload = {
+                            'cookies': updated_cookies.get('cookies', []),
+                            'origins': updated_cookies.get('origins', []),
+                        }
+                        save_cookies_to_db(task.account_id, cookies_payload, db)
                         cookies_updated = True
                         if douyin_logger:
                             douyin_logger.success(f"账号 {task.account_id} 的 cookies 已更新到数据库")
@@ -683,26 +1223,57 @@ async def execute_video_upload(task_id: int):
             
             print(f"[TASK STATUS] 视频发布成功，更新任务 {task_id} 状态为 completed...")
             
+            # 发布后操作（自动评论/点赞/分享）
+            try:
+                post_action_result = await _execute_after_publish_actions(
+                    task,
+                    account_file,
+                    platform,
+                    preferred_video_url=preferred_video_url,
+                )
+                task.after_publish_result = json.dumps(post_action_result, ensure_ascii=False)
+                db.commit()
+                if douyin_logger:
+                    douyin_logger.info(f"Task {task_id} after_publish_actions result: {post_action_result}")
+            except Exception as post_action_error:
+                try:
+                    task.after_publish_result = json.dumps(
+                        {"enabled": True, "success": False, "error": str(post_action_error)},
+                        ensure_ascii=False
+                    )
+                    db.commit()
+                except Exception:
+                    pass
+                if douyin_logger:
+                    douyin_logger.warning(f"Task {task_id} after_publish_actions failed: {post_action_error}")
+
             try:
                 from models import PlanVideo, PublishPlan
-                # 先尝试精确匹配 video_url 和 processing 状态
-                plan_video = db.query(PlanVideo).filter(
-                    PlanVideo.video_url == task.video_url,
-                    PlanVideo.status == 'processing'
-                ).first()
-                
-                # 如果没找到，尝试匹配 video_url（可能是状态已经是其他值，或者URL有细微差别）
+                plan_video = None
+                # 1) 优先按 plan_video_id 精确匹配，避免 URL 模糊误命中
+                if getattr(task, 'plan_video_id', None):
+                    plan_video = db.query(PlanVideo).filter(PlanVideo.id == task.plan_video_id).first()
+                    if plan_video:
+                        print(f"[TASK STATUS] 通过 plan_video_id 精确匹配 PlanVideo {plan_video.id}")
+
+                # 2) 回退：按完全一致 URL + 状态匹配
                 if not plan_video:
-                    # 尝试模糊匹配：去掉URL参数后匹配
+                    plan_video = db.query(PlanVideo).filter(
+                        PlanVideo.video_url == task.video_url,
+                        PlanVideo.status.in_(['processing', 'pending'])
+                    ).order_by(PlanVideo.created_at.asc()).first()
+
+                # 3) 最后回退：按 URL path（去 query）匹配
+                if not plan_video:
                     task_url_base = urlparse(task.video_url).path
                     all_plan_videos = db.query(PlanVideo).filter(
-                        PlanVideo.status.in_(['processing', 'pending'])  # 可能是 processing 或 pending
+                        PlanVideo.status.in_(['processing', 'pending'])
                     ).all()
                     for pv in all_plan_videos:
                         pv_url_base = urlparse(pv.video_url).path
-                        if task_url_base == pv_url_base or task.video_url in pv.video_url or pv.video_url in task.video_url:
+                        if task_url_base and task_url_base == pv_url_base:
                             plan_video = pv
-                            print(f"[TASK STATUS] 通过URL模糊匹配找到 PlanVideo {pv.id} (原URL: {pv.video_url[:100]}..., 任务URL: {task.video_url[:100]}...)")
+                            print(f"[TASK STATUS] 通过URL路径匹配找到 PlanVideo {pv.id}")
                             break
                 
                 if plan_video:
@@ -722,20 +1293,21 @@ async def execute_video_upload(task_id: int):
                             PlanVideo.plan_id == plan.id,
                             PlanVideo.status == 'published'
                         ).count()
+                        total_count = db.query(PlanVideo).filter(
+                            PlanVideo.plan_id == plan.id
+                        ).count()
                         processing_count = db.query(PlanVideo).filter(
                             PlanVideo.plan_id == plan.id,
                             PlanVideo.status == 'processing'
-                        ).count()
-                        pending_count = db.query(PlanVideo).filter(
-                            PlanVideo.plan_id == plan.id,
-                            PlanVideo.status == 'pending'
                         ).count()
                         failed_count = db.query(PlanVideo).filter(
                             PlanVideo.plan_id == plan.id,
                             PlanVideo.status == 'failed'
                         ).count()
+                        pending_count = max(total_count - published_count, 0)
                         
                         old_published_count = plan.published_count
+                        plan.video_count = total_count
                         plan.published_count = published_count
                         plan.pending_count = pending_count
                         plan.updated_at = datetime.now()
@@ -743,14 +1315,13 @@ async def execute_video_upload(task_id: int):
                         print(f"[TASK STATUS] 发布计划 {plan.id} 统计更新: 已发布={published_count} (之前={old_published_count}), 处理中={processing_count}, 待处理={pending_count}, 失败={failed_count}")
                         
                         # 如果所有视频都已处理完成，标记计划为 completed
-                        if pending_count == 0 and processing_count == 0:
+                        if total_count > 0 and published_count >= total_count:
                             plan.status = 'completed'
                             print(f"[TASK STATUS] 发布计划 {plan.id} 所有视频已处理完成，状态更新为 completed")
                         else:
-                            # 如果还有待处理的视频，将计划状态改回 pending，以便后续继续处理
-                            if plan.status == 'publishing' and pending_count > 0:
-                                plan.status = 'pending'
-                                print(f"[TASK STATUS] 发布计划 {plan.id} 还有 {pending_count} 个视频待处理，状态改回 pending 以便后续处理")
+                            # 仍有未完成视频，保持发布中
+                            plan.status = 'publishing'
+                            print(f"[TASK STATUS] 发布计划 {plan.id} 还有 {pending_count} 个未完成视频，状态保持 publishing")
                     
                     db.commit()
                     print(f"[TASK STATUS] ✅ 已更新发布计划视频状态: PlanVideo {plan_video.id} -> published, 计划 {plan.id if plan else 'N/A'} 已发布数: {published_count}")
@@ -914,7 +1485,7 @@ async def execute_video_upload(task_id: int):
                 pass
 
 
-async def execute_upload(title: str, file_path: str, tags: list, publish_date, account_file: str, thumbnail_path: str = None, account_id: int = None, platform: str = 'douyin', description: str = ''):
+async def execute_upload(title: str, file_path: str, tags: list, publish_date, account_file: str, thumbnail_path: str = None, account_id: int = None, platform: str = 'douyin', description: str = '', collect_published_url: bool = True):
     """执行视频上传，按平台分发到对应上传器。description 为正文/描述，用于小红书等平台。"""
     try:
         if platform == 'xiaohongshu':
@@ -1004,7 +1575,8 @@ async def execute_upload(title: str, file_path: str, tags: list, publish_date, a
                 account_file=account_file,
                 thumbnail_path=thumbnail_path,
                 account_id=account_id,
-                description=description or ''
+                description=description or '',
+                collect_published_url=collect_published_url
             )
             print(f"[UPLOAD] 开始调用 DouYinVideo.main() 执行视频上传...")
             if douyin_logger:

@@ -448,6 +448,19 @@
                 <el-checkbox label="auto_share">自动分享</el-checkbox>
               </el-checkbox-group>
             </el-form-item>
+            <el-form-item
+              v-if="form.after_publish_actions.includes('auto_comment')"
+              label="评论内容"
+            >
+              <el-input
+                v-model="form.after_publish_comment"
+                type="textarea"
+                :rows="3"
+                maxlength="200"
+                show-word-limit
+                placeholder="请输入自动评论内容，例如：发布完成，欢迎交流。"
+              />
+            </el-form-item>
             <el-form-item label="失败重试">
               <el-switch v-model="form.retry_on_failure" />
               <span v-if="form.retry_on_failure" style="margin-left: 10px;">
@@ -505,6 +518,7 @@ const form = ref({
   publish_date: '',
   priority: 'normal',
   after_publish_actions: [],
+  after_publish_comment: '',
   retry_on_failure: false,
   retry_count: 3
 })
@@ -1189,6 +1203,10 @@ const handleSubmit = async () => {
       return
     }
   }
+  if (form.value.after_publish_actions.includes('auto_comment') && !form.value.after_publish_comment?.trim()) {
+    ElMessage.warning('已开启自动评论，请填写评论内容')
+    return
+  }
 
   try {
     submitting.value = true
@@ -1205,6 +1223,7 @@ const handleSubmit = async () => {
       publish_interval: publishType.value === 'interval' ? publishInterval.value : undefined,
       priority: form.value.priority,
       after_publish_actions: form.value.after_publish_actions,
+      after_publish_comment: form.value.after_publish_comment,
       retry_on_failure: form.value.retry_on_failure,
       retry_count: form.value.retry_count
     }
@@ -1239,6 +1258,7 @@ const handleReset = () => {
     publish_date: '',
     priority: 'normal',
     after_publish_actions: [],
+    after_publish_comment: '',
     retry_on_failure: false,
     retry_count: 3
   }

@@ -7,10 +7,14 @@ import shutil
 import sys
 import uuid
 import logging
+import subprocess
+import datetime
 from flask import Blueprint, request, jsonify
 from werkzeug.utils import secure_filename
 
-from utils import response_success, response_error, login_required
+from utils import response_success, response_error, login_required, get_current_user_id
+from db import get_db
+from models import VideoLibrary
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +25,147 @@ UPLOAD_DIR = os.path.join(BASE_DIR, 'uploads', 'materials', 'ai_video')
 
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
+
+OUTPUT_LIBRARY_DIR = os.path.join(BASE_DIR, 'uploads', 'videos')
+if not os.path.exists(OUTPUT_LIBRARY_DIR):
+    os.makedirs(OUTPUT_LIBRARY_DIR)
+
+TARGET_WIDTH = 720
+TARGET_HEIGHT = 1280
+TARGET_FPS = 24
+TARGET_PRESET = "veryfast"
+TARGET_CRF = "28"
+
+
+def _is_video_ext(ext: str) -> bool:
+    return ext.lower() in {'.mp4', '.mov', '.avi', '.mkv'}
+
+
+def _normalize_uploaded_material(path: str, ext: str) -> str:
+    """
+    Pre-standardize uploaded local material to reduce edit-time conversion cost.
+    - video -> mp4(h264, yuv420p, 1080x1920, 30fps)
+    - image keeps original file; image normalization is handled in compose stage.
+    Returns normalized file path.
+    """
+    if not _is_video_ext(ext):
+        return path
+
+    base, _ = os.path.splitext(path)
+    normalized_path = f"{base}_norm.mp4"
+    ffmpeg_bin = os.environ.get("FFMPEG_PATH", "").strip()
+    if not ffmpeg_bin:
+        try:
+            from config import FFMPEG_PATH as _CFG_FFMPEG_PATH
+            ffmpeg_bin = (_CFG_FFMPEG_PATH or "").strip()
+        except Exception:
+            ffmpeg_bin = ""
+    if not ffmpeg_bin:
+        ffmpeg_bin = shutil.which("ffmpeg") or ""
+    if not ffmpeg_bin:
+        logger.warning("素材预标准化跳过：未找到 ffmpeg 可执行文件")
+        return path
+
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-i",
+        path,
+        "-vf",
+        f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad={TARGET_WIDTH}:{TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2,fps={TARGET_FPS},format=yuv420p",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        TARGET_PRESET,
+        "-crf",
+        TARGET_CRF,
+        normalized_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        return normalized_path
+    except Exception as e:
+        logger.warning(f'素材预标准化失败，回退原文件: {e}')
+        return path
+
+
+def _extract_task_video_candidates(task) -> list:
+    candidates = []
+    for attr in ("final_videos", "videos", "combined_videos"):
+        value = getattr(task, attr, None)
+        if isinstance(value, list):
+            candidates.extend(value)
+    single = getattr(task, "final_video", None)
+    if single:
+        candidates.append(single)
+    return candidates
+
+
+def _candidate_to_path(item) -> str:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        for key in ("path", "file_path", "local_path", "video_path"):
+            val = item.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        url_val = item.get("url")
+        if isinstance(url_val, str) and url_val.startswith("/"):
+            return os.path.join(BASE_DIR, url_val.lstrip("/"))
+    return ""
+
+
+def _import_generated_videos_to_library(task, user_id: int) -> list:
+    imported_urls = []
+    candidates = _extract_task_video_candidates(task)
+    if not candidates:
+        return imported_urls
+
+    with get_db() as db:
+        for item in candidates:
+            src = _candidate_to_path(item)
+            if not src:
+                continue
+            if src.startswith("/"):
+                src = os.path.join(BASE_DIR, src.lstrip("/"))
+            if not os.path.isabs(src):
+                src = os.path.join(BASE_DIR, src)
+            src = os.path.normpath(src)
+            if not os.path.exists(src) or os.path.isdir(src):
+                continue
+
+            ext = os.path.splitext(src)[1].lower() or ".mp4"
+            dst_name = f"money_printer_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{ext}"
+            dst = os.path.join(OUTPUT_LIBRARY_DIR, dst_name)
+            shutil.copy2(src, dst)
+
+            rel = os.path.relpath(dst, BASE_DIR).replace(os.sep, "/")
+            video_url = f"/{rel}"
+            exists = db.query(VideoLibrary).filter(
+                VideoLibrary.user_id == user_id,
+                VideoLibrary.video_url == video_url,
+            ).first()
+            if exists:
+                continue
+
+            record = VideoLibrary(
+                user_id=user_id,
+                video_name=dst_name,
+                video_url=video_url,
+                platform='output',
+                created_at=datetime.datetime.now(),
+                updated_at=datetime.datetime.now(),
+            )
+            db.add(record)
+            imported_urls.append(video_url)
+        db.commit()
+
+    return imported_urls
 
 
 def _get_deepseek_api_key():
@@ -62,9 +207,11 @@ def upload_material():
         if ext not in allowed_extensions:
             return response_error(f'不支持的文件格式: {ext}', 400)
         
-        filename = f"{uuid.uuid4().hex}{ext}"
+        save_ext = '.mp4' if _is_video_ext(ext) else ext
+        filename = f"{uuid.uuid4().hex}{save_ext}"
         filepath = os.path.join(UPLOAD_DIR, filename)
         file.save(filepath)
+        filepath = _normalize_uploaded_material(filepath, ext)
         
         rel_path = os.path.relpath(filepath, BASE_DIR).replace(os.sep, '/')
         
@@ -467,6 +614,14 @@ def create_video():
         stop_at = data.get('stop_at', 'video')
         
         task = start_video_task(params=params, stop_at=stop_at)
+        user_id = get_current_user_id()
+        imported_urls = []
+        try:
+            task_state = (getattr(task, 'state', '') or '').lower()
+            if task_state in ('completed', 'success', 'done'):
+                imported_urls = _import_generated_videos_to_library(task, user_id)
+        except Exception as _e:
+            logger.warning(f'导入成品库失败: {_e}')
         
         return response_success({
             'task_id': task.task_id,
@@ -480,6 +635,7 @@ def create_video():
             'materials': task.materials,
             'videos': task.videos,
             'combined_videos': task.combined_videos,
+            'imported_output_urls': imported_urls,
             'error': task.error,
         })
         
@@ -513,6 +669,14 @@ def get_task_status(task_id):
         if not task:
             return response_error('任务不存在', 404)
         
+        imported_urls = []
+        try:
+            task_state = (getattr(task, 'state', '') or '').lower()
+            if task_state in ('completed', 'success', 'done'):
+                imported_urls = _import_generated_videos_to_library(task, get_current_user_id())
+        except Exception as _e:
+            logger.warning(f'轮询导入成品库失败: {_e}')
+
         return response_success({
             'task_id': task.task_id,
             'state': task.state,
@@ -525,6 +689,7 @@ def get_task_status(task_id):
             'materials': task.materials,
             'videos': task.videos,
             'combined_videos': task.combined_videos,
+            'imported_output_urls': imported_urls,
             'error': task.error,
         })
         

@@ -21,6 +21,20 @@ _async_loop = None
 _loop_thread = None
 _loop_lock = threading.Lock()
 
+
+def _is_session_closed_error(err: Exception) -> bool:
+    """判断是否为 Playwright 会话/页面已关闭类错误。"""
+    msg = str(err or "").lower()
+    markers = [
+        "target page, context or browser has been closed",
+        "context has been closed",
+        "browser has been closed",
+        "page has been closed",
+        "frame was detached",
+        "net::err_aborted",
+    ]
+    return any(m in msg for m in markers)
+
 def get_or_create_loop():
     """获取或创建全局事件循环"""
     global _async_loop, _loop_thread
@@ -66,10 +80,15 @@ async def start_login_session(account_id: int, platform: str = 'douyin') -> Dict
         if account_id in login_sessions:
             await cleanup_login_session(account_id)
         
-        # 启动浏览器（登录时强制使用非headless模式，让用户看到二维码）
+        # 启动浏览器。优先使用配置；在无图形桌面的服务器环境自动退化为 headless。
         playwright = await async_playwright().start()
+        use_headless = LOCAL_CHROME_HEADLESS
+        if not use_headless:
+            # Linux 服务器常见无 DISPLAY，强制有头会启动失败。
+            if os.name != 'nt' and not os.environ.get('DISPLAY'):
+                use_headless = True
         browser_options = {
-            'headless': False  # 登录时必须显示浏览器窗口，让用户扫码
+            'headless': use_headless
         }
         if LOCAL_CHROME_PATH and os.path.exists(LOCAL_CHROME_PATH):
             browser_options['executable_path'] = LOCAL_CHROME_PATH
@@ -160,6 +179,7 @@ async def start_login_session(account_id: int, platform: str = 'douyin') -> Dict
         
         # 查找二维码图片
         qrcode_base64 = None
+        sms_required = False
         max_retries = 10
         for i in range(max_retries):
             try:
@@ -190,15 +210,40 @@ async def start_login_session(account_id: int, platform: str = 'douyin') -> Dict
             except Exception as e:
                 print(f"查找二维码失败 (尝试 {i+1}/{max_retries}): {e}")
                 await asyncio.sleep(1)
-        
+
+        # 检测是否处于手机号/验证码登录流程
         if not qrcode_base64:
-            # 如果找不到二维码，尝试截图整个页面
             try:
-                screenshot = await page.screenshot(type='png')
-                qrcode_base64 = base64.b64encode(screenshot).decode('utf-8')
-            except Exception as e:
-                print(f"截图失败: {e}")
-        
+                phone_login_count = await page.get_by_text('手机号登录').count()
+                sms_code_count = await page.get_by_text('验证码').count()
+                sms_required = (phone_login_count > 0) or (sms_code_count > 0)
+            except Exception:
+                sms_required = False
+
+        if not qrcode_base64 and not sms_required:
+            # 二维码模式下必须真实拿到二维码，避免前端未展示二维码就进入“登录成功”流程
+            try:
+                await context.close()
+            except Exception:
+                pass
+            try:
+                await browser.close()
+            except Exception:
+                pass
+            try:
+                await playwright.stop()
+            except Exception:
+                pass
+            return {
+                'success': False,
+                'qrcode': None,
+                'status': 'failed',
+                'login_mode': 'qrcode',
+                'message': '未检测到可用二维码，请重试'
+            }
+
+        session_status = 'sms_required' if sms_required else 'waiting'
+
         # 保存会话信息
         login_sessions[account_id] = {
             'playwright': playwright,
@@ -206,7 +251,10 @@ async def start_login_session(account_id: int, platform: str = 'douyin') -> Dict
             'context': context,
             'page': page,
             'qrcode': qrcode_base64,
-            'status': 'waiting',  # waiting, scanning, logged_in, failed
+            'login_mode': 'sms' if sms_required else 'qrcode',
+            'qrcode_seen': bool(qrcode_base64),
+            'scan_seen': False,
+            'status': session_status,  # waiting, scanning, sms_required, logged_in, failed
             'start_time': datetime.now(),
             'platform': platform
         }
@@ -214,7 +262,9 @@ async def start_login_session(account_id: int, platform: str = 'douyin') -> Dict
         return {
             'success': True,
             'qrcode': qrcode_base64,
-            'message': '二维码获取成功' if qrcode_base64 else '二维码获取失败，请查看页面截图'
+            'status': session_status,
+            'login_mode': 'sms' if sms_required else 'qrcode',
+            'message': '检测到手机号验证码登录，请在浏览器完成验证' if sms_required else ('二维码获取成功' if qrcode_base64 else '二维码获取失败，请查看页面截图')
         }
         
     except Exception as e:
@@ -258,6 +308,12 @@ async def check_login_status(account_id: int) -> Dict:
             'cookies': None,
             'message': '登录会话无效，请重新启动登录'
         }
+
+    def _allow_logged_in_transition() -> bool:
+        # 二维码模式下，必须先出现“已扫描”阶段，才允许判定成功
+        if session.get('login_mode') == 'qrcode':
+            return bool(session.get('scan_seen'))
+        return True
     
     # 按平台配置关键 cookie 与 URL
     if platform == 'xiaohongshu':
@@ -325,7 +381,7 @@ async def check_login_status(account_id: int) -> Dict:
                 if has_key_cookie:
                     try:
                         current_url = page.url
-                        if url_creator in current_url and url_login_check(current_url):
+                        if url_creator in current_url and url_login_check(current_url) and _allow_logged_in_transition():
                             session['status'] = 'logged_in'
                             session['cookies'] = storage_state
                             return {
@@ -335,21 +391,28 @@ async def check_login_status(account_id: int) -> Dict:
                             }
                     except Exception as e:
                         print(f"检查URL失败: {e}")
-                    session['status'] = 'logged_in'
-                    session['cookies'] = storage_state
-                    return {
-                        'status': 'logged_in',
-                        'cookies': storage_state,
-                        'message': '登录成功（通过cookies检测）'
-                    }
+                    # 仅凭 cookie 不判定成功，必须满足 URL 已离开登录页。
         except Exception as e:
             print(f"获取cookies失败: {e}")
+            if _is_session_closed_error(e):
+                await cleanup_login_session(account_id)
+                return {
+                    'status': 'failed',
+                    'cookies': None,
+                    'message': '登录会话已关闭，请重新启动登录'
+                }
         
         # 仅读取当前页面状态，不做 wait_for_load_state 等操作，避免轮询时干扰页面导致二维码刷新/失效
         try:
             current_url = page.url
             
             if url_upload in current_url:
+                if not _allow_logged_in_transition():
+                    return {
+                        'status': 'waiting',
+                        'cookies': None,
+                        'message': '等待扫码登录'
+                    }
                 try:
                     # 微信/快手：若页面仍显示「立即登录」「扫码登录」，说明未真正登录，不返回成功
                     if platform in ('weixin', 'kuaishou'):
@@ -375,8 +438,15 @@ async def check_login_status(account_id: int) -> Dict:
                         }
                 except Exception as e:
                     print(f"获取cookies失败: {e}")
+                    if _is_session_closed_error(e):
+                        await cleanup_login_session(account_id)
+                        return {
+                            'status': 'failed',
+                            'cookies': None,
+                            'message': '登录会话已关闭，请重新启动登录'
+                        }
             
-            if url_creator in current_url and url_login_check(current_url):
+            if url_creator in current_url and url_login_check(current_url) and _allow_logged_in_transition():
                 try:
                     storage_state = await context.storage_state()
                     cookies = storage_state.get('cookies', [])
@@ -392,17 +462,40 @@ async def check_login_status(account_id: int) -> Dict:
                             }
                 except Exception as e:
                     print(f"验证cookies失败: {e}")
+                    if _is_session_closed_error(e):
+                        await cleanup_login_session(account_id)
+                        return {
+                            'status': 'failed',
+                            'cookies': None,
+                            'message': '登录会话已关闭，请重新启动登录'
+                        }
         except Exception as e:
             print(f"检查URL失败: {e}")
+            if _is_session_closed_error(e):
+                await cleanup_login_session(account_id)
+                return {
+                    'status': 'failed',
+                    'cookies': None,
+                    'message': '登录会话已关闭，请重新启动登录'
+                }
         
         # 安全地检查页面是否有登录元素
         login_text_count = 0
+        phone_login_count = 0
         try:
             phone_login_locator = page.get_by_text('手机号登录')
             if phone_login_locator:
-                login_text_count += await phone_login_locator.count()
+                phone_login_count = await phone_login_locator.count()
+                login_text_count += phone_login_count
         except Exception as e:
             print(f"检查'手机号登录'文本失败: {e}")
+            if _is_session_closed_error(e):
+                await cleanup_login_session(account_id)
+                return {
+                    'status': 'failed',
+                    'cookies': None,
+                    'message': '登录会话已关闭，请重新启动登录'
+                }
         
         try:
             qr_login_locator = page.get_by_text('扫码登录')
@@ -410,6 +503,13 @@ async def check_login_status(account_id: int) -> Dict:
                 login_text_count += await qr_login_locator.count()
         except Exception as e:
             print(f"检查'扫码登录'文本失败: {e}")
+            if _is_session_closed_error(e):
+                await cleanup_login_session(account_id)
+                return {
+                    'status': 'failed',
+                    'cookies': None,
+                    'message': '登录会话已关闭，请重新启动登录'
+                }
         
         try:
             if platform == 'weixin':
@@ -427,6 +527,15 @@ async def check_login_status(account_id: int) -> Dict:
         except Exception as e:
             print(f"检查'快手扫码登录'文本失败: {e}")
         
+        # 手机号验证码流程优先返回，让前端展示对应界面
+        if phone_login_count > 0:
+            session['status'] = 'sms_required'
+            return {
+                'status': 'sms_required',
+                'cookies': None,
+                'message': '检测到手机号验证码登录，请在浏览器中完成登录'
+            }
+
         if login_text_count > 0:
             # 还在登录页面
             # 检查二维码是否过期
@@ -456,6 +565,7 @@ async def check_login_status(account_id: int) -> Dict:
                     scanning_count += await confirm_locator.count()
                 
                 if scanning_count > 0:
+                    session['scan_seen'] = True
                     session['status'] = 'scanning'
                     return {
                         'status': 'scanning',
@@ -478,15 +588,24 @@ async def check_login_status(account_id: int) -> Dict:
                 if cookies:
                     cookie_names = [c.get('name', '') for c in cookies]
                     if any(name in cookie_names for name in key_cookies_list):
-                        session['status'] = 'logged_in'
-                        session['cookies'] = storage_state
-                        return {
-                            'status': 'logged_in',
-                            'cookies': storage_state,
-                            'message': '登录成功'
-                        }
+                        current_url = page.url
+                        if ((url_creator in current_url and url_login_check(current_url)) or (url_upload in current_url)) and _allow_logged_in_transition():
+                            session['status'] = 'logged_in'
+                            session['cookies'] = storage_state
+                            return {
+                                'status': 'logged_in',
+                                'cookies': storage_state,
+                                'message': '登录成功'
+                            }
             except Exception as e:
                 print(f"获取cookies失败: {e}")
+                if _is_session_closed_error(e):
+                    await cleanup_login_session(account_id)
+                    return {
+                        'status': 'failed',
+                        'cookies': None,
+                        'message': '登录会话已关闭，请重新启动登录'
+                    }
             
             return {
                 'status': 'waiting',
@@ -539,22 +658,33 @@ async def cleanup_login_session(account_id: int):
     if account_id not in login_sessions:
         return
     
-    session = login_sessions[account_id]
-    
+    session = login_sessions.get(account_id)
+    if not session:
+        return
+
     try:
-        if 'page' in session and session['page']:
-            await session['page'].close()
-        if 'context' in session and session['context']:
-            await session['context'].close()
-        if 'browser' in session and session['browser']:
-            await session['browser'].close()
-        if 'playwright' in session and session['playwright']:
-            await session['playwright'].stop()
-    except Exception as e:
-        print(f"清理登录会话失败: {e}")
-    
-    if account_id in login_sessions:
-        del login_sessions[account_id]
+        if session.get('page'):
+            try:
+                await session['page'].close()
+            except Exception:
+                pass
+        if session.get('context'):
+            try:
+                await session['context'].close()
+            except Exception:
+                pass
+        if session.get('browser'):
+            try:
+                await session['browser'].close()
+            except Exception:
+                pass
+        if session.get('playwright'):
+            try:
+                await session['playwright'].stop()
+            except Exception:
+                pass
+    finally:
+        login_sessions.pop(account_id, None)
 
 
 # 同步包装函数，用于在Flask中使用
@@ -645,4 +775,5 @@ def cleanup_login_session_sync(account_id: int):
         print(f"清理登录会话失败: {e}")
         import traceback
         traceback.print_exc()
-
+        # 即便异步清理超时，也要强制移除内存会话，防止脏状态残留
+        login_sessions.pop(account_id, None)

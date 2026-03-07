@@ -5,7 +5,7 @@
 import threading
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
@@ -21,6 +21,8 @@ from services.task_executor import (
 class TaskProcessor:
     """任务处理器（定时任务使用轻量级定时检查，其他任务按需触发）"""
     
+    PLAN_VIDEO_TIMEOUT_SECONDS = 60
+
     def __init__(self, poll_interval: int = None):
         """
         初始化任务处理器
@@ -72,7 +74,7 @@ class TaskProcessor:
             
             # 先检查有 publish_time 的计划（批量发布）
             plans_with_publish_time = db.query(PublishPlan).filter(
-                PublishPlan.status == 'pending',
+                PublishPlan.status.in_(['pending', 'publishing']),
                 PublishPlan.publish_time <= now,
                 PublishPlan.publish_time.isnot(None)
             ).limit(10).all()
@@ -106,7 +108,7 @@ class TaskProcessor:
             
             # 检查没有 publish_time 但有视频 schedule_time 已到的计划（纯分阶段发布）
             plans_without_publish_time = db.query(PublishPlan).filter(
-                PublishPlan.status == 'pending',
+                PublishPlan.status.in_(['pending', 'publishing']),
                 PublishPlan.publish_time.is_(None)  # 计划的 publish_time 为空
             ).limit(10).all()
             
@@ -219,9 +221,9 @@ class TaskProcessor:
                 else:
                     # 任务可能卡住了，重置状态
                     print(f"[TASK POLL] ⚠️ 任务 {task.id} 可能卡住了（已运行 {int(elapsed_seconds)} 秒），重置为 pending 状态，准备重新发布")
-                    task.status = 'pending'
-                    task.started_at = None
-                    task.error_message = None
+                    task.status = 'failed'
+                    task.completed_at = datetime.now()
+                    task.error_message = f"upload_stuck_timeout_{int(elapsed_seconds)}s"
                     db.commit()
             
             # 立即更新任务状态为 uploading，避免重复处理
@@ -268,7 +270,7 @@ class TaskProcessor:
             
             # 先查找有 publish_time 且已到的计划（批量发布）
             plans_with_publish_time = db.query(PublishPlan).filter(
-                PublishPlan.status == 'pending',
+                PublishPlan.status.in_(['pending', 'publishing']),
                 PublishPlan.publish_time <= now,
                 PublishPlan.publish_time.isnot(None)
             ).all()
@@ -393,13 +395,19 @@ class TaskProcessor:
                         import os
                         
                         for i, video in enumerate(plan_videos):
-                            if video.publish_time and video.publish_time > now:
-                                print(f"[TASK POLL] PlanVideo {video.id} 发布时间未到 ({video.publish_time})，跳过")
+                            effective_time = video.schedule_time if video.schedule_time else plan.publish_time
+                            if effective_time and now > (effective_time + timedelta(seconds=self.PLAN_VIDEO_TIMEOUT_SECONDS)):
+                                video.status = 'failed'
+                                print(f"[TASK POLL] PlanVideo {video.id} timeout>{self.PLAN_VIDEO_TIMEOUT_SECONDS}s, mark failed and skip")
+                                continue
+                            if effective_time and effective_time > now:
+                                print(f"[TASK POLL] PlanVideo {video.id} 发布时间未到 ({effective_time})，跳过")
                                 continue
                             
                             existing_task = db.query(VideoTask).filter(
-                                VideoTask.plan_video_id == video.id
-                            ).first()
+                                VideoTask.plan_video_id == video.id,
+                                VideoTask.status.in_(['pending', 'uploading', 'processing', 'completed'])
+                            ).order_by(VideoTask.id.desc()).first()
                             
                             if existing_task:
                                 print(f"[TASK POLL] PlanVideo {video.id} 已有任务 {existing_task.id}(status={existing_task.status})，跳过")
@@ -430,7 +438,7 @@ class TaskProcessor:
                                 existing_task = db.query(VideoTask).filter(
                                     VideoTask.video_url == video.video_url,
                                     VideoTask.account_id == account.id,
-                                    VideoTask.status != 'completed'
+                                    VideoTask.status.in_(['pending', 'uploading', 'processing'])
                                 ).first()
                                 
                                 if existing_task:
@@ -444,11 +452,7 @@ class TaskProcessor:
                                     # 如果任务之前失败了，则重置该任务为 pending，允许重新发布
                                     if existing_task.status == 'failed':
                                         print(f"[TASK POLL] 任务 {existing_task.id} 之前失败，本次将重置为 pending 重新发布")
-                                        existing_task.status = 'pending'
-                                        existing_task.started_at = None
-                                        existing_task.completed_at = None
-                                        existing_task.error_message = None
-                                        video.status = 'processing'
+                                        video.status = 'failed'
                                         # 不再 continue，后续统计和任务处理会把该任务当作新的待处理任务
                                         continue
                                 
@@ -471,6 +475,17 @@ class TaskProcessor:
                                         video_tags_list = video.video_tags
                                 
                                 # 创建视频任务
+                                claimed = db.query(PlanVideo).filter(
+                                    PlanVideo.id == video.id,
+                                    PlanVideo.status == 'pending'
+                                ).update(
+                                    {PlanVideo.status: 'processing'},
+                                    synchronize_session=False
+                                )
+                                if claimed == 0:
+                                    print(f"[TASK POLL] PlanVideo {video.id} already claimed by other worker, skip")
+                                    continue
+
                                 video_task = VideoTask(
                                     account_id=account.id,
                                     device_id=account.device_id,
@@ -508,7 +523,10 @@ class TaskProcessor:
                         else:
                             plan.status = 'pending'
                         plan.published_count = published_count
-                        plan.pending_count = plan.video_count - published_count
+                        plan.pending_count = db.query(PlanVideo).filter(
+                            PlanVideo.plan_id == plan.id,
+                            PlanVideo.status == 'pending'
+                        ).count()
                         plan.failed_count = failed_count
                         plan.updated_at = now
                         
@@ -565,16 +583,27 @@ class TaskProcessor:
                     import os
                     
                     for i, video in enumerate(pending_videos):
-                        if video.publish_time and video.publish_time > now:
-                            print(f"[TASK POLL] PlanVideo {video.id} 发布时间未到 ({video.publish_time})，跳过")
+                        effective_time = video.schedule_time if video.schedule_time else plan.publish_time
+                        if effective_time and now > (effective_time + timedelta(seconds=self.PLAN_VIDEO_TIMEOUT_SECONDS)):
+                            video.status = 'failed'
+                            print(f"[TASK POLL] PlanVideo {video.id} timeout>{self.PLAN_VIDEO_TIMEOUT_SECONDS}s, mark failed and skip")
+                            continue
+                        if effective_time and effective_time > now:
+                            print(f"[TASK POLL] PlanVideo {video.id} 发布时间未到 ({effective_time})，跳过")
                             continue
                         
                         existing_task = db.query(VideoTask).filter(
-                            VideoTask.plan_video_id == video.id
-                        ).first()
+                            VideoTask.plan_video_id == video.id,
+                            VideoTask.status.in_(['pending', 'uploading', 'processing', 'completed'])
+                        ).order_by(VideoTask.id.desc()).first()
                         
                         if existing_task:
-                            print(f"[TASK POLL] PlanVideo {video.id} 已有任务 {existing_task.id}，跳过")
+                            if existing_task.status == 'completed':
+                                video.status = 'published'
+                                print(f"[TASK POLL] PlanVideo {video.id} 命中已完成任务 {existing_task.id}，同步为 published")
+                            else:
+                                video.status = 'processing'
+                                print(f"[TASK POLL] PlanVideo {video.id} 已有进行中任务 {existing_task.id}，保持 processing")
                             continue
                         
                         video_path = video.video_url
@@ -597,7 +626,28 @@ class TaskProcessor:
                         
                         if file_exists:
                             account = accounts[i % len(accounts)]
+                            # 兼容旧数据：若历史任务缺少 plan_video_id，也按 video_url + account_id 去重
+                            existing_task_by_url = db.query(VideoTask).filter(
+                                VideoTask.video_url == video.video_url,
+                                VideoTask.account_id == account.id,
+                                VideoTask.status.in_(['pending', 'uploading', 'processing'])
+                            ).first()
+                            if existing_task_by_url:
+                                print(f"[TASK POLL] PlanVideo {video.id} 命中 URL 去重任务 {existing_task_by_url.id}，跳过重复创建")
+                                video.status = 'processing'
+                                continue
                             
+                            claimed = db.query(PlanVideo).filter(
+                                PlanVideo.id == video.id,
+                                PlanVideo.status == 'pending'
+                            ).update(
+                                {PlanVideo.status: 'processing'},
+                                synchronize_session=False
+                            )
+                            if claimed == 0:
+                                print(f"[TASK POLL] PlanVideo {video.id} already claimed by other worker, skip")
+                                continue
+
                             video_task = VideoTask(
                                 account_id=account.id,
                                 device_id=account.device_id,
@@ -629,7 +679,10 @@ class TaskProcessor:
                     ).count()
                     
                     plan.published_count = published_count
-                    plan.pending_count = plan.video_count - published_count
+                    plan.pending_count = db.query(PlanVideo).filter(
+                        PlanVideo.plan_id == plan.id,
+                        PlanVideo.status == 'pending'
+                    ).count()
                     plan.failed_count = failed_count
                     plan.updated_at = now
                     
@@ -643,7 +696,7 @@ class TaskProcessor:
                     traceback.print_exc()
             
             # 1.6 检查超时的视频（每条视频在计划发布时间后45秒未完成则标记失败）
-            TIMEOUT_SECONDS = 45
+            TIMEOUT_SECONDS = self.PLAN_VIDEO_TIMEOUT_SECONDS
             timeout_plans = db.query(PublishPlan).filter(
                 PublishPlan.status.in_(['pending', 'publishing'])
             ).all()
@@ -651,12 +704,14 @@ class TaskProcessor:
                 try:
                     candidates = db.query(PlanVideo).filter(
                         PlanVideo.plan_id == plan.id,
-                        PlanVideo.status.in_(['pending', 'processing'])
+                        # 仅对尚未开始创建上传任务的待发布视频执行 1 分钟超时
+                        # 避免 processing 中的视频被过早判失败（上传通常超过 1 分钟）
+                        PlanVideo.status == 'pending'
                     ).all()
 
                     changed = False
                     for video in candidates:
-                        due_time = video.publish_time or plan.publish_time
+                        due_time = video.schedule_time or plan.publish_time
                         if not due_time:
                             # 无计划时间的不做45秒超时判定（立即发布场景）
                             continue
@@ -666,17 +721,6 @@ class TaskProcessor:
                         video.status = 'failed'
                         changed = True
                         print(f"[TASK POLL] PlanVideo {video.id} 超时(>{TIMEOUT_SECONDS}s)，标记为失败")
-
-                        # 同步停止并标记关联上传任务，避免继续回写成功状态
-                        timeout_tasks = db.query(VideoTask).filter(
-                            VideoTask.plan_video_id == video.id,
-                            VideoTask.status.in_(['pending', 'uploading', 'processing'])
-                        ).all()
-                        for task in timeout_tasks:
-                            task.status = 'failed'
-                            task.error_message = f"计划发布时间后{TIMEOUT_SECONDS}秒内未发布完成，系统已停止并标记失败"
-                            task.completed_at = now
-                            print(f"[TASK POLL] VideoTask {task.id} 因超时标记为 failed")
 
                     if not changed:
                         continue
@@ -700,7 +744,10 @@ class TaskProcessor:
                     
                     plan.published_count = published_count
                     plan.failed_count = failed_count
-                    plan.pending_count = plan.video_count - published_count
+                    plan.pending_count = db.query(PlanVideo).filter(
+                        PlanVideo.plan_id == plan.id,
+                        PlanVideo.status == 'pending'
+                    ).count()
                     
                     if pending_only_count == 0 and processing_count == 0:
                         if published_count > 0 and failed_count > 0:

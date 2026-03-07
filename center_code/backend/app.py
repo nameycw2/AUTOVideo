@@ -45,6 +45,7 @@ from api.video_editor import video_editor_bp
 from api.publish import publish_bp
 from api.material import material_bp
 from api.ai import ai_bp
+from api.money_printer import money_printer_bp
 from api.editor import editor_bp
 
 # 导入任务处理器
@@ -52,6 +53,10 @@ from services.task_processor import get_task_processor
 from workers.auto_transcode_worker import maybe_start_transcode_worker
 
 app = Flask(__name__, static_folder=_frontend_dist_dir(), static_url_path='')
+
+# Ensure money_printer routes are always available.
+if 'money_printer' not in app.blueprints:
+    app.register_blueprint(money_printer_bp)
 
 # ==================== Session 安全配置 ====================
 # 警告：生产环境必须设置强随机 SECRET_KEY！
@@ -307,6 +312,13 @@ for category, modules in blueprint_modules.items():
             registered_modules[category].append((module_name, False, str(e)))
 
 
+try:
+    app.register_blueprint(money_printer_bp)
+except Exception:
+    # Keep boot resilient; duplicate registration would raise.
+    pass
+
+
 def init_db():
     """初始化数据库表"""
     try:
@@ -330,6 +342,22 @@ def init_db():
             except Exception as e:
                 # 如果表不存在或列不存在，忽略错误
                 print(f"⚠️ 设置大小写敏感时出现警告: {e}")
+            try:
+                db.execute(text("ALTER TABLE video_tasks ADD COLUMN after_publish_actions TEXT NULL;"))
+            except Exception:
+                pass
+            try:
+                db.execute(text("ALTER TABLE video_tasks ADD COLUMN after_publish_comment VARCHAR(500) NULL;"))
+            except Exception:
+                pass
+            try:
+                db.execute(text("ALTER TABLE video_tasks ADD COLUMN after_publish_result TEXT NULL;"))
+            except Exception:
+                pass
+            try:
+                db.execute(text("ALTER TABLE video_tasks ADD COLUMN plan_video_id INT NULL;"))
+            except Exception:
+                pass
     except Exception as e:
         error_msg = str(e)
         if "Access denied" in error_msg or "1045" in error_msg:
@@ -527,6 +555,37 @@ def is_port_available(port):
         except OSError:
             return False
 
+
+if __name__ == '__main__':
+    init_db()
+    from config import SERVER_PORT
+    port = int(SERVER_PORT)
+
+    if not is_port_available(port):
+        print(f"ERROR: port {port} is occupied. Please free it and retry.")
+        sys.exit(1)
+
+    task_processor_started = False
+    try:
+        task_processor = get_task_processor()
+        task_processor.start()
+        task_processor_started = True
+        print("Task processor started.")
+    except Exception as e:
+        print(f"Task processor failed to start: {e}")
+    print(f"Backend URL: http://localhost:{port}")
+    print("Press Ctrl+C to stop.\n")
+
+    try:
+        app.run(debug=True, host='0.0.0.0', port=port, use_reloader=False)
+    finally:
+        if task_processor_started:
+            try:
+                task_processor = get_task_processor()
+                task_processor.stop()
+            except Exception:
+                pass
+
 def print_startup_info():
     """打印启动信息"""
     print("\n" + "="*70)
@@ -588,13 +647,13 @@ def print_startup_info():
     print("\n" + "="*70 + "\n")
     return task_processor_status
 
-if __name__ == '__main__':
+if False and __name__ == '__main__':
     # 初始化数据库
     init_db()
     
     # 从config.py获取默认端口（已从环境变量读取）
     from config import SERVER_PORT
-    port = SERVER_PORT
+    port = int(SERVER_PORT)
     
     # 命令行参数优先级最高（用于临时覆盖）
     if len(sys.argv) > 1:

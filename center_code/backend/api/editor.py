@@ -11,6 +11,8 @@ import json
 import shutil
 import uuid
 import math
+import subprocess
+import re
 from typing import Optional, List, Dict, Any, Tuple
 from urllib.parse import urlparse
 from flask import Blueprint, request, send_from_directory
@@ -40,6 +42,73 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 editor_bp = Blueprint('editor', __name__, url_prefix='/api')
+
+# Windows default GBK decoding may crash reader threads when ffmpeg emits UTF-8 bytes.
+# Force UTF-8 with replacement whenever text mode is enabled and encoding is not set.
+_ORIGINAL_SUBPROCESS_POPEN = subprocess.Popen
+
+
+def _popen_with_utf8_fallback(*args, **kwargs):
+    text_mode = bool(kwargs.get("text") or kwargs.get("universal_newlines"))
+    if text_mode and "encoding" not in kwargs:
+        kwargs["encoding"] = "utf-8"
+        kwargs.setdefault("errors", "replace")
+    return _ORIGINAL_SUBPROCESS_POPEN(*args, **kwargs)
+
+
+subprocess.Popen = _popen_with_utf8_fallback
+
+
+def _normalize_task_terminal_state(db, task: VideoEditTask) -> bool:
+    """
+    Normalize task status for frontend polling:
+    - success -> completed
+    - running/pending with existing output file -> completed
+    Returns True when task is updated.
+    """
+    if not task:
+        return False
+
+    status = (task.status or "").lower()
+    updated = False
+
+    if status == "success":
+        task.status = "completed"
+        task.progress = 100
+        task.updated_at = datetime.datetime.now()
+        return True
+
+    if status in ("running", "pending", "processing"):
+        output_rel = task.output_path or ""
+        if output_rel:
+            output_abs = get_abs_path(output_rel)
+            if os.path.exists(output_abs):
+                task.status = "completed"
+                task.progress = 100
+                task.error_message = None
+                task.updated_at = datetime.datetime.now()
+                updated = True
+
+    return updated
+
+
+@editor_bp.before_app_request
+def _auto_finalize_polled_task():
+    """Self-heal stale task status during /api/tasks/<id> polling."""
+    try:
+        if request.method != "GET":
+            return None
+        m = re.fullmatch(r"/api/tasks/(\d+)", request.path or "")
+        if not m:
+            return None
+        task_id = int(m.group(1))
+        with get_db() as db:
+            task = db.query(VideoEditTask).filter(VideoEditTask.id == task_id).first()
+            if task and _normalize_task_terminal_state(db, task):
+                db.commit()
+    except Exception:
+        logger.exception("Auto-finalize polled task failed")
+    return None
 
 # ==========================================
 #  1. 路径与常量全局配置
@@ -95,7 +164,7 @@ def _ims_to_cos_worker(task_id, job_id, aliyun_oss_url, user_id):
                         with get_db() as db:
                             task = db.query(VideoEditTask).filter(VideoEditTask.id == task_id).first()
                             if task:
-                                task.status = "success"
+                                task.status = "completed"
                                 task.progress = 100
                                 task.preview_url = final_url
                                 task.updated_at = datetime.datetime.now()
@@ -117,7 +186,7 @@ def _ims_to_cos_worker(task_id, job_id, aliyun_oss_url, user_id):
                 with get_db() as db:
                     task = db.query(VideoEditTask).filter(VideoEditTask.id == task_id).first()
                     if task:
-                        task.status, task.error_message = "fail", "阿里云 IMS 渲染失败"
+                        task.status, task.error_message = "failed", "阿里云 IMS 渲染失败"
                         db.commit()
                 return
 
@@ -653,8 +722,8 @@ def _run_edit_task(
                 except Exception as lib_error:
                     logger.exception(f"Task {task_id}: 保存到视频库失败: {lib_error}")
                 
-                # 更新任务状�?
-                task.status = "success"
+                # 更新任务状表
+                task.status = "completed"
                 task.output_path = relative_output_path
                 task.output_filename = output_filename
                 task.preview_url = cos_url or preview_url  # 优先使用COS URL

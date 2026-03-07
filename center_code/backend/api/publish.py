@@ -231,6 +231,14 @@ def submit_publish():
         publish_type = data.get('publish_type', 'immediate')
         publish_interval = data.get('publish_interval', 30)  # 默认30分钟
         priority = data.get('priority', 'normal')
+        after_publish_actions = data.get('after_publish_actions', []) or []
+        after_publish_comment = (data.get('after_publish_comment') or '').strip()
+        if not after_publish_comment:
+            after_publish_comment = "发布完成，欢迎交流。"
+        valid_actions = {'auto_comment', 'auto_like', 'auto_share'}
+        if not isinstance(after_publish_actions, list):
+            return response_error('after_publish_actions must be a list', 400)
+        after_publish_actions = [a for a in after_publish_actions if a in valid_actions]
         
         # 验证必填字段
         if not video_title:
@@ -360,6 +368,8 @@ def submit_publish():
                     video_tags=video_tags_json,
                     publish_date=task_publish_date,
                     thumbnail_url=final_thumbnail_url,
+                    after_publish_actions=json.dumps(after_publish_actions, ensure_ascii=False) if after_publish_actions else None,
+                    after_publish_comment=after_publish_comment if 'auto_comment' in after_publish_actions else None,
                     status='pending'
                 )
                 db.add(task)
@@ -472,6 +482,8 @@ def get_publish_history():
                     'platform': account.platform,
                     'status': task.status,
                     'progress': task.progress,
+                    'after_publish_actions': json.loads(task.after_publish_actions) if task.after_publish_actions else [],
+                    'after_publish_result': json.loads(task.after_publish_result) if task.after_publish_result else None,
                     'error_message': task.error_message,
                     'created_at': task.created_at.isoformat() if task.created_at else None,
                     'started_at': task.started_at.isoformat() if task.started_at else None,

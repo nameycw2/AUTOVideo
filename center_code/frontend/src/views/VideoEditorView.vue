@@ -2299,16 +2299,36 @@ async function pollTaskStatus(taskId) {
         // 持续标记当前任务，避免刷新/返回期间丢失
         currentTaskId.value = task.id || taskId
 
+        const currentStatus = String(task.status || '').toLowerCase()
         progress.value = {
           show: true,
           value: task.progress || 0,
-          text: task.status === 'running' ? '正在处理…' : task.status === 'success' ? '处理完成' : task.error_message || ''
+          text: ['running', 'processing', 'pending'].includes(currentStatus)
+            ? '正在处理…'
+            : ['success', 'completed'].includes(currentStatus)
+              ? '处理完成'
+              : task.error_message || ''
         }
 
-        if (task.status === 'success') {
-          if (task.preview_url) {
-            previewUrl.value = task.preview_url
-            exportUrl.value = task.preview_url
+        if (['success', 'completed'].includes(currentStatus)) {
+          let resolvedPreviewUrl = task.preview_url || ''
+          if (!resolvedPreviewUrl && task.output_path) {
+            const rawOutputPath = String(task.output_path)
+            if (/^https?:\/\//i.test(rawOutputPath)) {
+              resolvedPreviewUrl = rawOutputPath
+            } else if (rawOutputPath.includes(':\\')) {
+              const normalized = rawOutputPath.replace(/\\/g, '/')
+              const uploadsIndex = normalized.toLowerCase().indexOf('/uploads/')
+              if (uploadsIndex >= 0) {
+                resolvedPreviewUrl = normalized.slice(uploadsIndex)
+              }
+            } else {
+              resolvedPreviewUrl = `/${rawOutputPath.replace(/^\/+/, '')}`
+            }
+          }
+          if (resolvedPreviewUrl) {
+            previewUrl.value = resolvedPreviewUrl
+            exportUrl.value = resolvedPreviewUrl
           }
           // 任务完成后清理当前任务标记
           currentTaskId.value = null
@@ -2317,7 +2337,7 @@ async function pollTaskStatus(taskId) {
           progress.value = { show: false, value: 100, text: '完成' }
           alert('剪辑完成！')
           emit('refresh-outputs')
-        } else if (task.status === 'fail') {
+        } else if (['fail', 'failed'].includes(currentStatus)) {
           // 任务失败也清理标记
           currentTaskId.value = null
           localStorage.removeItem('ve.currentEditTaskId')

@@ -1,17 +1,137 @@
 """
 发布计划API
 """
-from flask import Blueprint, request
+from flask import Blueprint, request, Response, stream_with_context
 from datetime import datetime
 import sys
 import os
 import json
+import time
+from urllib.parse import urlparse
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import response_success, response_error, login_required
+from utils import response_success, response_error, login_required, decode_access_token
 from models import PublishPlan, PlanVideo, Merchant, VideoTask
 from db import get_db
 
 publish_plans_bp = Blueprint('publish_plans', __name__, url_prefix='/api/publish-plans')
+
+
+def _canonical_video_key(url: str) -> str:
+    """Normalize video URL for deduplication: ignore query params/signature."""
+    if not url:
+        return ''
+    try:
+        parsed = urlparse(url)
+        # Keep host + path to avoid cross-domain collisions while ignoring presigned query
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".lower()
+        return (parsed.path or url).lower()
+    except Exception:
+        return (url or '').lower()
+
+
+def _calc_plan_counts(db, plan_id: int):
+    total = db.query(PlanVideo).filter(PlanVideo.plan_id == plan_id).count()
+    published = db.query(PlanVideo).filter(
+        PlanVideo.plan_id == plan_id,
+        PlanVideo.status == 'published'
+    ).count()
+    pending = max(total - published, 0)
+    processing = db.query(PlanVideo).filter(
+        PlanVideo.plan_id == plan_id,
+        PlanVideo.status == 'processing'
+    ).count()
+    failed = db.query(PlanVideo).filter(
+        PlanVideo.plan_id == plan_id,
+        PlanVideo.status == 'failed'
+    ).count()
+    return total, published, pending, processing, failed
+
+
+def _derive_plan_status(total: int, published: int, processing: int, failed: int) -> str:
+    # Keep business semantics simple and stable for the list UI:
+    # pending -> publishing -> completed
+    if total > 0 and published >= total:
+        return 'completed'
+    if published > 0 or processing > 0:
+        return 'publishing'
+    if failed > 0 and published == 0:
+        return 'failed'
+    return 'pending'
+
+
+def _parse_client_datetime(value: str) -> datetime:
+    """
+    Parse client datetime and normalize to local naive datetime for scheduler.
+    Supports ISO strings with/without timezone and simple 'YYYY/MM/DD HH:MM:SS'.
+    """
+    if value is None:
+        raise ValueError("empty datetime")
+    text = str(value).strip()
+    if not text:
+        raise ValueError("empty datetime")
+
+    # Accept trailing Z from frontend ISO strings.
+    if text.endswith('Z'):
+        text = text[:-1] + '+00:00'
+
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        dt = datetime.strptime(text, "%Y/%m/%d %H:%M:%S")
+
+    if dt.tzinfo is not None:
+        local_tz = datetime.now().astimezone().tzinfo
+        dt = dt.astimezone(local_tz).replace(tzinfo=None)
+    return dt
+
+
+@publish_plans_bp.route('/events', methods=['GET'])
+def publish_plan_events():
+    """
+    SSE event stream for publish-plan progress.
+    Frontend passes JWT via query param `token` because EventSource cannot set Authorization header.
+    """
+    token = (request.args.get('token') or '').strip()
+    if not token:
+        return response_error('Unauthorized', 401)
+    try:
+        decode_access_token(token)
+    except Exception:
+        return response_error('Unauthorized', 401)
+
+    def event_stream():
+        last_payload = None
+        while True:
+            try:
+                with get_db() as db:
+                    plans = db.query(PublishPlan).all()
+                    data = [
+                        {
+                            'id': p.id,
+                            'published_count': int(p.published_count or 0),
+                            'status': p.status,
+                            'updated_at': p.updated_at.isoformat() if p.updated_at else None
+                        }
+                        for p in plans
+                    ]
+                payload = json.dumps({'plans': data}, ensure_ascii=False, sort_keys=True)
+                if payload != last_payload:
+                    yield f"data: {payload}\n\n"
+                    last_payload = payload
+            except GeneratorExit:
+                break
+            except Exception as e:
+                yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+            time.sleep(1)
+
+    headers = {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no'
+    }
+    return Response(stream_with_context(event_stream()), headers=headers)
 
 
 @publish_plans_bp.route('', methods=['GET'])
@@ -89,6 +209,14 @@ def get_publish_plans():
                 if plan.merchant_id:
                     merchant = db.query(Merchant).filter(Merchant.id == plan.merchant_id).first()
                     merchant_name = merchant.merchant_name if merchant else None
+
+                total, published, pending, processing, failed = _calc_plan_counts(db, plan.id)
+                derived_status = _derive_plan_status(total, published, processing, failed)
+                # 同步回表，避免后续页面看到旧计数
+                plan.video_count = total
+                plan.published_count = published
+                plan.pending_count = pending
+                plan.status = derived_status
                 
                 plans_list.append({
                     'id': plan.id,
@@ -96,16 +224,17 @@ def get_publish_plans():
                     'platform': plan.platform,
                     'merchant_id': plan.merchant_id,
                     'merchant_name': merchant_name,
-                    'video_count': plan.video_count,
-                    'published_count': plan.published_count,
-                    'pending_count': plan.pending_count,
+                    'video_count': total,
+                    'published_count': published,
+                    'pending_count': pending,
                     'claimed_count': plan.claimed_count,
                     'account_count': plan.account_count,
                     'distribution_mode': plan.distribution_mode,
-                    'status': plan.status,
+                    'status': derived_status,
                     'publish_time': plan.publish_time.isoformat() if plan.publish_time else None,
                     'created_at': plan.created_at.isoformat() if plan.created_at else None
                 })
+            db.commit()
         
         return response_success({
             'plans': plans_list,
@@ -176,7 +305,7 @@ def create_publish_plan():
         parsed_publish_time = None
         if publish_time:
             try:
-                parsed_publish_time = datetime.fromisoformat(publish_time)
+                parsed_publish_time = _parse_client_datetime(publish_time)
             except ValueError:
                 return response_error('Invalid publish_time format. Please use ISO format (YYYY-MM-DD HH:mm:ss)', 400)
         
@@ -302,20 +431,28 @@ def get_publish_plan(plan_id):
                     'created_at': video.created_at.isoformat() if video.created_at else None
                 })
             
+            total, published, pending, processing, failed = _calc_plan_counts(db, plan.id)
+            derived_status = _derive_plan_status(total, published, processing, failed)
+            plan.video_count = total
+            plan.published_count = published
+            plan.pending_count = pending
+            plan.status = derived_status
+            db.commit()
+
             return response_success({
                 'id': plan.id,
                 'plan_name': plan.plan_name,
                 'platform': plan.platform,
                 'merchant_id': plan.merchant_id,
                 'merchant_name': merchant_name,
-                'video_count': plan.video_count,
+                'video_count': total,
                 'videos': videos_list,
-                'published_count': plan.published_count,
-                'pending_count': plan.pending_count,
+                'published_count': published,
+                'pending_count': pending,
                 'claimed_count': plan.claimed_count,
                 'account_count': plan.account_count,
                 'distribution_mode': plan.distribution_mode,
-                'status': plan.status,
+                'status': derived_status,
                 'publish_time': plan.publish_time.isoformat() if plan.publish_time else None,
                 'created_at': plan.created_at.isoformat() if plan.created_at else None
             })
@@ -381,7 +518,7 @@ def update_publish_plan(plan_id):
             if 'publish_time' in data:
                 if data['publish_time']:
                     try:
-                        plan.publish_time = datetime.fromisoformat(data['publish_time'])
+                        plan.publish_time = _parse_client_datetime(data['publish_time'])
                     except ValueError:
                         return response_error('Invalid publish_time format. Please use ISO format (YYYY-MM-DD HH:mm:ss)', 400)
                 else:
@@ -637,10 +774,18 @@ def add_video_to_plan(plan_id):
             if not plan:
                 return response_error('Publish plan not found', 404)
             
+            canonical_key = _canonical_video_key(video_url)
             existing_video = db.query(PlanVideo).filter(
                 PlanVideo.plan_id == plan_id,
                 PlanVideo.video_url == video_url
             ).first()
+            if not existing_video and canonical_key:
+                # 兜底：忽略 query 参数后去重，避免同一 COS 文件因签名不同重复加入
+                candidates = db.query(PlanVideo).filter(PlanVideo.plan_id == plan_id).all()
+                for c in candidates:
+                    if _canonical_video_key(c.video_url) == canonical_key:
+                        existing_video = c
+                        break
             
             if existing_video:
                 return response_success({
@@ -655,7 +800,7 @@ def add_video_to_plan(plan_id):
             parsed_schedule_time = None
             if schedule_time:
                 try:
-                    parsed_schedule_time = datetime.fromisoformat(schedule_time)
+                    parsed_schedule_time = _parse_client_datetime(schedule_time)
                 except ValueError:
                     return response_error('Invalid schedule_time format. Please use ISO format (YYYY-MM-DD HH:mm:ss)', 400)
             
@@ -672,12 +817,11 @@ def add_video_to_plan(plan_id):
             db.add(video)
             db.flush()
             
-            plan.video_count = db.query(PlanVideo).filter(PlanVideo.plan_id == plan_id).count()
-            plan.published_count = db.query(PlanVideo).filter(
-                PlanVideo.plan_id == plan_id,
-                PlanVideo.status == 'published'
-            ).count()
-            plan.pending_count = plan.video_count - plan.published_count
+            total, published, pending, processing, failed = _calc_plan_counts(db, plan_id)
+            plan.video_count = total
+            plan.published_count = published
+            plan.pending_count = pending
+            plan.status = _derive_plan_status(total, published, processing, failed)
             plan.updated_at = datetime.now()
             
             db.commit()
@@ -685,7 +829,8 @@ def add_video_to_plan(plan_id):
             # 如果视频发布时间为空（立即）或已到，触发任务处理
             # 注意：使用全局任务处理器，避免数据库会话冲突
             now = datetime.now()
-            should_trigger = (video.publish_time is None) or (video.publish_time <= now)
+            effective_time = video.schedule_time or plan.publish_time
+            should_trigger = (effective_time is None) or (effective_time <= now)
             
             if should_trigger:
                 print(f"[发布计划] 检测到需要触发任务处理: {plan.plan_name} (ID: {plan.id}), status={plan.status}")
@@ -803,7 +948,7 @@ def update_plan_video(plan_id, video_id):
                 schedule_time = data['schedule_time']
                 if schedule_time:
                     try:
-                        video.schedule_time = datetime.fromisoformat(schedule_time)
+                        video.schedule_time = _parse_client_datetime(schedule_time)
                     except ValueError:
                         return response_error('Invalid schedule_time format. Please use ISO format (YYYY-MM-DD HH:mm:ss)', 400)
                 else:
@@ -948,7 +1093,7 @@ def get_plan_videos_history():
                     'status': status,
                     'progress': progress,
                     'error_message': error_message,
-                    'publish_time': (plan_video.publish_time or plan.publish_time).isoformat() if (plan_video.publish_time or plan.publish_time) else None,
+                    'publish_time': (plan_video.schedule_time or plan.publish_time).isoformat() if (plan_video.schedule_time or plan.publish_time) else None,
                     'created_at': plan_video.created_at.isoformat() if plan_video.created_at else None,
                     'task_id': video_task.id if video_task else None,
                 })

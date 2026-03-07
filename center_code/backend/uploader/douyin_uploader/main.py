@@ -11,9 +11,25 @@ from utils.base_social_media import set_init_script
 from utils.log import douyin_logger
 
 
+def _build_chromium_launch_kwargs(headless: bool, executable_path: str = ""):
+    args = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-notifications",
+        "--disable-save-password-bubble",
+        "--password-store=basic",
+        "--disable-features=PasswordManagerEnableService,PasswordManagerOnboarding,AutofillServerCommunication",
+    ]
+    kwargs = {"headless": headless, "args": args}
+    if executable_path:
+        kwargs["executable_path"] = executable_path
+    return kwargs
+
+
 async def cookie_auth(account_file):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
+        browser = await playwright.chromium.launch(
+            **_build_chromium_launch_kwargs(LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH)
+        )
         context = await browser.new_context(storage_state=account_file)
         context = await set_init_script(context)
         # 创建一个新的页面
@@ -48,11 +64,9 @@ async def douyin_setup(account_file, handle=False):
 
 async def douyin_cookie_gen(account_file):
     async with async_playwright() as playwright:
-        options = {
-            'headless': LOCAL_CHROME_HEADLESS
-        }
-        # Make sure to run headed.
-        browser = await playwright.chromium.launch(**options)
+        browser = await playwright.chromium.launch(
+            **_build_chromium_launch_kwargs(LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH)
+        )
         # Setup context however you like.
         context = await browser.new_context()  # Pass any options
         context = await set_init_script(context)
@@ -66,7 +80,8 @@ async def douyin_cookie_gen(account_file):
 
 class DouYinVideo(object):
     def __init__(self, title, file_path, tags, publish_date, account_file, thumbnail_path=None,
-                 action_delay: float = 0.3, final_display_delay: float = 100.0, account_id: int = None, description: str = ''):
+                 action_delay: float = 0.3, final_display_delay: float = 100.0, account_id: int = None,
+                 description: str = '', collect_published_url: bool = True):
         self.title = title  # 视频标题
         self.description = (description or "").strip()  # 正文/描述，填入作品简介
         self.file_path = file_path
@@ -83,10 +98,47 @@ class DouYinVideo(object):
         self.thumbnail_path = thumbnail_path
         self.action_delay = max(action_delay, 0.1)
         self.final_display_delay = max(final_display_delay, 0)
+        self.collect_published_url = bool(collect_published_url)
 
     async def _human_pause(self, multiplier: float = 1.0):
         """统一的操作延迟，避免页面响应过快导致元素未渲染。"""
         await asyncio.sleep(self.action_delay * multiplier)
+
+    async def _dismiss_common_popups(self, page):
+        candidates = ["自动保存登录信息", "保存登录信息", "保存", "取消", "确定", "确认", "暂不", "稍后再说", "以后再说", "下次再说"]
+        for _ in range(2):
+            handled = False
+            for text in candidates:
+                try:
+                    btn = page.get_by_role("button", name=text).first
+                    if await btn.count():
+                        await btn.click(timeout=1200)
+                        handled = True
+                        await asyncio.sleep(0.3)
+                except Exception:
+                    pass
+                try:
+                    ok = await page.evaluate(
+                        """(targetText) => {
+                            const nodes = Array.from(document.querySelectorAll('button, div[role="button"], span, i'));
+                            for (const n of nodes) {
+                                const t = (n.innerText || n.textContent || '').trim();
+                                if (t && t.includes(targetText)) {
+                                    n.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }""",
+                        text
+                    )
+                    if ok:
+                        handled = True
+                        await asyncio.sleep(0.3)
+                except Exception:
+                    pass
+            if not handled:
+                break
     
     async def _wait_for_login(self, page, context, browser, max_wait_time: int = 300):
         """
@@ -316,7 +368,9 @@ class DouYinVideo(object):
             browser_name = "Edge" if "Edge" in self.local_executable_path else "Chrome" if "Chrome" in self.local_executable_path else "Chromium"
             douyin_logger.info(f"[浏览器] 使用 {browser_name} 浏览器: {self.local_executable_path}")
             try:
-                browser = await playwright.chromium.launch(headless=self.headless, executable_path=self.local_executable_path)
+                browser = await playwright.chromium.launch(
+                    **_build_chromium_launch_kwargs(self.headless, self.local_executable_path)
+                )
             except Exception as e:
                 error_msg = (
                     f"无法启动 Chrome 浏览器: {e}\n"
@@ -330,7 +384,9 @@ class DouYinVideo(object):
                 raise
         else:
             douyin_logger.info("[浏览器] 使用默认 Chromium 浏览器（未指定路径）")
-            browser = await playwright.chromium.launch(headless=self.headless)
+            browser = await playwright.chromium.launch(
+                **_build_chromium_launch_kwargs(self.headless, LOCAL_CHROME_PATH)
+            )
         
         # 创建一个浏览器上下文，使用指定的 cookie 文件
         douyin_logger.info(f"Loading cookies from: {self.account_file}")
@@ -343,6 +399,7 @@ class DouYinVideo(object):
         douyin_logger.info(f'[+]正在上传-------{self.title}.mp4')
         douyin_logger.info(f'[-] 正在打开上传页面...')
         await page.goto("https://creator.douyin.com/creator-micro/content/upload")
+        await self._dismiss_common_popups(page)
         await self._human_pause(2)
         
         # 验证cookies是否有效（检查是否跳转到登录页面）
@@ -503,9 +560,11 @@ class DouYinVideo(object):
                         await publish_button.click()
                         publish_button_clicked = True
                         douyin_logger.info("  [-] 已点击发布按钮，正在等待发布完成...")
+                        await self._dismiss_common_popups(page)
                         await self._human_pause(1.0)  # 点击后等待一下
                 
                 # 检查当前URL，如果已经跳转到作品管理页面，说明发布成功
+                await self._dismiss_common_popups(page)
                 current_url = page.url
                 if "creator.douyin.com/creator-micro/content/manage" in current_url:
                     douyin_logger.success("  [-]视频发布成功（已跳转到作品管理页面）")
@@ -570,6 +629,7 @@ class DouYinVideo(object):
         
         # 读取更新后的cookies（用于返回给调用方）
         updated_cookies = None
+        published_video_url = None
         try:
             if os.path.exists(self.account_file):
                 import json
@@ -578,6 +638,27 @@ class DouYinVideo(object):
                 douyin_logger.info(f'  [-]成功读取更新后的cookies，准备返回给 task_executor 更新任务状态')
         except Exception as e:
             douyin_logger.warning(f'  [-]读取cookies文件失败: {e}，但上传已成功，将返回成功标记')
+
+        # 按需提取本次发布后的视频链接（用于发布后自动点赞/评论/分享）
+        if self.collect_published_url:
+            try:
+                video_page = await context.new_page()
+                await video_page.goto("https://www.douyin.com/user/self?showTab=post", wait_until="domcontentloaded")
+                await asyncio.sleep(5)
+                published_video_url = await video_page.evaluate(
+                    """() => {
+                        const a = document.querySelector('a[href*="/video/"]');
+                        if (!a) return '';
+                        const href = a.getAttribute('href') || '';
+                        if (!href) return '';
+                        return href.startsWith('http') ? href : ('https://www.douyin.com' + href);
+                    }"""
+                )
+                await video_page.close()
+                if published_video_url:
+                    douyin_logger.info(f"  [-]提取到最新视频链接: {published_video_url}")
+            except Exception as e:
+                douyin_logger.warning(f"  [-]提取发布后视频链接失败: {e}")
         
         # 如果提供了 account_id，更新数据库中的cookies
         if self.account_id and updated_cookies:
@@ -596,11 +677,15 @@ class DouYinVideo(object):
         result = None
         if updated_cookies:
             douyin_logger.info(f'  [-]返回更新后的cookies给 task_executor，任务状态将被更新为 completed')
-            result = updated_cookies
+            result = dict(updated_cookies)
+            if published_video_url:
+                result["published_video_url"] = published_video_url
         else:
             # 即使 cookies 读取失败，也返回成功标记，确保任务状态能正确更新
             douyin_logger.info(f'  [-]cookies读取失败，返回成功标记给 task_executor，任务状态将被更新为 completed')
             result = {"upload_success": True}
+            if published_video_url:
+                result["published_video_url"] = published_video_url
         
         # 在后台异步关闭浏览器（不阻塞返回）
         async def close_browser_async():

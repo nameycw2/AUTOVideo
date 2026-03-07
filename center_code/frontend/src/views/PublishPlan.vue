@@ -410,13 +410,28 @@
                     <div class="phase-row" style="margin-top: 16px;">
                       <div class="phase-field" style="flex: 1;">
                         <label class="field-label">标签/话题</label>
-                        <el-input
-                          v-model="item.video_tags"
-                          :placeholder="`输入标签，用逗号分隔（可选，最多${tagMaxCount}个标签）`"
-                          maxlength="200"
-                        />
+                        <el-select
+                          :model-value="toTagArray(item.video_tags)"
+                          @update:model-value="(val) => setItemVideoTags(item, val, form.platform)"
+                          multiple
+                          filterable
+                          allow-create
+                          default-first-option
+                          :placeholder="`选择或输入标签（最多${tagMaxCount}个）`"
+                          style="width: 100%;"
+                          :max-collapse-tags="3"
+                          collapse-tags
+                          collapse-tags-tooltip
+                        >
+                          <el-option
+                            v-for="tag in popularTags"
+                            :key="`phase-${index}-${tag}`"
+                            :label="tag"
+                            :value="tag"
+                          />
+                        </el-select>
                         <div style="font-size: 12px; color: #909399; margin-top: 4px;">
-                          💡 提示：多个标签请用逗号分隔，例如：美食,旅行,生活
+                          💡 提示：最多 {{ tagMaxCount }} 个标签，可选择或输入
                         </div>
                       </div>
                     </div>
@@ -524,13 +539,28 @@
                       <!-- 标签 -->
                       <div class="batch-field" style="margin-top: 16px;">
                         <label class="field-label">标签/话题</label>
-                        <el-input
-                          v-model="item.video_tags"
-                          :placeholder="`输入标签，用逗号分隔（可选，最多${tagMaxCount}个标签）`"
-                          maxlength="200"
-                        />
+                        <el-select
+                          :model-value="toTagArray(item.video_tags)"
+                          @update:model-value="(val) => setItemVideoTags(item, val, form.platform)"
+                          multiple
+                          filterable
+                          allow-create
+                          default-first-option
+                          :placeholder="`选择或输入标签（最多${tagMaxCount}个）`"
+                          style="width: 100%;"
+                          :max-collapse-tags="3"
+                          collapse-tags
+                          collapse-tags-tooltip
+                        >
+                          <el-option
+                            v-for="tag in popularTags"
+                            :key="`batch-${index}-${tag}`"
+                            :label="tag"
+                            :value="tag"
+                          />
+                        </el-select>
                         <div style="font-size: 12px; color: #909399; margin-top: 4px;">
-                          💡 提示：多个标签请用逗号分隔，例如：美食,旅行,生活
+                          💡 提示：最多 {{ tagMaxCount }} 个标签，可选择或输入
                         </div>
                       </div>
                     </div>
@@ -589,13 +619,27 @@
           />
         </el-form-item>
         <el-form-item label="标签/话题">
-          <el-input
-            v-model="videoEditForm.video_tags"
-            placeholder="输入标签，用逗号分隔（可选，最多5个标签）"
-            maxlength="200"
-          />
+          <el-select
+            v-model="videoEditTagsArray"
+            multiple
+            filterable
+            allow-create
+            default-first-option
+            :placeholder="`选择或输入标签（最多${videoEditTagMaxCount}个）`"
+            style="width: 100%;"
+            :max-collapse-tags="3"
+            collapse-tags
+            collapse-tags-tooltip
+          >
+            <el-option
+              v-for="tag in popularTags"
+              :key="`edit-${tag}`"
+              :label="tag"
+              :value="tag"
+            />
+          </el-select>
           <div style="font-size: 12px; color: #909399; margin-top: 4px;">
-            💡 提示：多个标签请用逗号分隔，例如：美食,旅行,生活
+            💡 提示：最多 {{ videoEditTagMaxCount }} 个标签，可选择或输入
           </div>
         </el-form-item>
         <el-form-item label="发布时间">
@@ -620,7 +664,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Delete, VideoPlay } from '@element-plus/icons-vue'
 import { getPublishPlans, createPublishPlan, updatePublishPlan, deletePublishPlan, addVideoToPlan, savePublishInfo, getPlanVideos, updatePlanVideo } from '../api/publishPlans'
@@ -665,6 +709,8 @@ const batchTime = ref('')
 
 // 展开行状态：存储每个计划的视频详情
 const expandedPlans = ref({})
+const plansEventSource = ref(null)
+const lastPublishedSnapshot = ref({})
 
 // 编辑视频对话框
 const videoEditDialogVisible = ref(false)
@@ -677,6 +723,11 @@ const videoEditForm = ref({
   schedule_time: '',
   platform: '' // 添加平台字段
 })
+
+const popularTags = ref([
+  '搞笑', '美食', '旅游', '音乐', '舞蹈', '宠物', '科技', '时尚', '健身', '教育',
+  '生活', '情感', '游戏', '影视', '汽车', '房产', '财经', '健康', '母婴', '美妆'
+])
 
 // 计算编辑视频时的标题最大长度（根据平台）
 const videoEditTitleMaxLength = computed(() => {
@@ -766,9 +817,7 @@ function weixinShortTitleValidate(title) {
   return { valid: true }
 }
 
-// 计算标签最大数量（根据平台）
-const tagMaxCount = computed(() => {
-  const platform = form.value.platform
+const getTagMaxCountByPlatform = (platform) => {
   if (platform === 'weixin') {
     return 10 // 微信视频号话题最多10个
   }
@@ -776,6 +825,45 @@ const tagMaxCount = computed(() => {
     return 5 // 抖音话题最多5个
   }
   return 10 // 其他平台默认10个
+}
+
+// 计算标签最大数量（根据平台）
+const tagMaxCount = computed(() => {
+  return getTagMaxCountByPlatform(form.value.platform)
+})
+
+const videoEditTagMaxCount = computed(() => {
+  return getTagMaxCountByPlatform(videoEditForm.value.platform)
+})
+
+const toTagArray = (raw) => {
+  if (!raw) return []
+  if (Array.isArray(raw)) return raw.map(t => String(t).trim()).filter(Boolean)
+  return String(raw)
+    .split(',')
+    .map(t => t.trim())
+    .filter(Boolean)
+}
+
+const normalizeTagArray = (tags, maxCount) => {
+  const unique = Array.from(new Set((tags || []).map(t => String(t).trim()).filter(Boolean)))
+  return unique.slice(0, maxCount)
+}
+
+const toTagStringByPlatform = (tags, platform) => {
+  const maxCount = getTagMaxCountByPlatform(platform)
+  return normalizeTagArray(tags, maxCount).join(',')
+}
+
+const setItemVideoTags = (item, tags, platform) => {
+  item.video_tags = toTagStringByPlatform(tags, platform)
+}
+
+const videoEditTagsArray = computed({
+  get: () => toTagArray(videoEditForm.value.video_tags),
+  set: (val) => {
+    videoEditForm.value.video_tags = toTagStringByPlatform(val, videoEditForm.value.platform)
+  }
 })
 
 // 与立即发布一致的平台规则提示（标题/标签/正文等）
@@ -866,9 +954,9 @@ const getVideoStatusType = (status) => {
 }
 
 // 加载计划视频详情
-const loadPlanVideos = async (planId) => {
+const loadPlanVideos = async (planId, force = false) => {
   // 如果已经加载过，直接返回
-  if (expandedPlans.value[planId] && expandedPlans.value[planId].videos) {
+  if (!force && expandedPlans.value[planId] && expandedPlans.value[planId].videos) {
     return
   }
   
@@ -923,6 +1011,80 @@ const loadPlans = async () => {
   } finally {
     loading.value = false
   }
+}
+
+const refreshExpandedPlanVideos = async () => {
+  const expandedPlanIds = Object.keys(expandedPlans.value || {})
+    .filter((id) => Array.isArray(expandedPlans.value[id]?.videos))
+  if (!expandedPlanIds.length) {
+    return
+  }
+  await Promise.all(
+    expandedPlanIds.map((id) => loadPlanVideos(Number(id), true))
+  )
+}
+
+const buildPublishedSnapshot = (planList) => {
+  const snapshot = {}
+  ;(planList || []).forEach((plan) => {
+    snapshot[plan.id] = Number(plan.published_count || 0)
+  })
+  return snapshot
+}
+
+const hasPublishedIncrease = (planList) => {
+  const prev = lastPublishedSnapshot.value || {}
+  let increased = false
+  ;(planList || []).forEach((plan) => {
+    const oldCount = Number(prev[plan.id] || 0)
+    const newCount = Number(plan.published_count || 0)
+    if (newCount > oldCount) {
+      increased = true
+    }
+  })
+  lastPublishedSnapshot.value = buildPublishedSnapshot(planList)
+  return increased
+}
+
+const startAutoRefresh = () => {
+  if (plansEventSource.value) return
+  lastPublishedSnapshot.value = buildPublishedSnapshot(plans.value)
+  const token = localStorage.getItem('auth_token')
+  if (!token) return
+  const baseUrl = import.meta.env.VITE_API_BASE_URL || '/api'
+  const eventUrl = `${baseUrl}/publish-plans/events?token=${encodeURIComponent(token)}`
+  const es = new EventSource(eventUrl)
+  es.onmessage = async (event) => {
+    try {
+      const payload = JSON.parse(event.data || '{}')
+      const remotePlans = payload?.plans || []
+      if (hasPublishedIncrease(remotePlans)) {
+        await loadPlans()
+        await refreshExpandedPlanVideos()
+      }
+    } catch (error) {
+      console.warn('publish plan event parse failed:', error)
+    }
+  }
+  es.onerror = async () => {
+    if (plansEventSource.value) {
+      plansEventSource.value.close()
+      plansEventSource.value = null
+    }
+    const hasPublishingPlan = (plans.value || []).some((p) => p.status === 'publishing')
+    if (hasPublishingPlan) {
+      // 事件流异常时回退为一次兜底刷新，避免界面长期不更新
+      await loadPlans()
+      await refreshExpandedPlanVideos()
+    }
+  }
+  plansEventSource.value = es
+}
+
+const stopAutoRefresh = () => {
+  if (!plansEventSource.value) return
+  plansEventSource.value.close()
+  plansEventSource.value = null
 }
 
 const loadMerchants = async () => {
@@ -1128,6 +1290,7 @@ const handleSubmit = async () => {
       ElMessage.error(response.message || (form.value.id ? '更新失败' : '创建失败'))
       dialogVisible.value = false
       loadPlans()
+      startAutoRefresh()
       return
     }
     
@@ -1135,6 +1298,7 @@ const handleSubmit = async () => {
       ElMessage.warning('计划创建成功但未获取到ID')
       dialogVisible.value = false
       loadPlans()
+      startAutoRefresh()
       return
     }
     
@@ -1154,7 +1318,7 @@ const handleSubmit = async () => {
               video_url: video.video_url,
               video_title: it.video_title || video.video_name || '',
               video_description: it.video_description || '',
-              video_tags: it.video_tags || '',
+              video_tags: toTagStringByPlatform(toTagArray(it.video_tags), form.value.platform),
               thumbnail_url: video.thumbnail_url || '',
               schedule_time: it.schedule_time || undefined  // 传递该视频的发布时间
             })
@@ -1171,7 +1335,7 @@ const handleSubmit = async () => {
               video_url: video.video_url,
               video_title: item.video_title || video.video_name || '',
               video_description: item.video_description || '',
-              video_tags: item.video_tags || '',
+              video_tags: toTagStringByPlatform(toTagArray(item.video_tags), form.value.platform),
               thumbnail_url: video.thumbnail_url || ''
             })
             console.log('添加视频响应:', addVideoResponse)
@@ -1187,6 +1351,7 @@ const handleSubmit = async () => {
       console.log('关闭对话框并刷新列表...')
       dialogVisible.value = false
       loadPlans()
+      startAutoRefresh()
     }
   } catch (error) {
     ElMessage.error('操作失败')
@@ -1201,10 +1366,15 @@ watch(() => form.value.platform, (newPlatform) => {
   form.value.account_ids = []
 })
 
-onMounted(() => {
-  loadPlans()
+onMounted(async () => {
+  await loadPlans()
   loadMerchants()
   loadVideoLibrary()
+  startAutoRefresh()
+})
+
+onBeforeUnmount(() => {
+  stopAutoRefresh()
 })
 
 const loadVideoLibrary = async () => {
@@ -1347,6 +1517,7 @@ const handleEditVideo = (planId, video) => {
 const handleUpdateVideo = async () => {
   try {
     const { planId, videoId, platform, ...updateData } = videoEditForm.value
+    updateData.video_tags = toTagStringByPlatform(toTagArray(updateData.video_tags), platform)
     
     // 验证标题长度和格式（根据平台）
     if (updateData.video_title) {

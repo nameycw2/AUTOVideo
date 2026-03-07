@@ -737,8 +737,8 @@ class VideoEditor:
             print(f"[VideoEditor] 播放速度：{speed}")
             
             try:
-                # 执行 FFmpeg 命令
-                ffmpeg.run(stream, overwrite_output=True, quiet=True)
+                # 执行 FFmpeg 命令，cmd 参数直接指定可执行文件路径
+                ffmpeg.run(stream, overwrite_output=True, quiet=True, cmd=ffmpeg_path)
             except ffmpeg.Error as ffmpeg_error:
                 # 捕获 FFmpeg 错误
                 stderr_msg = ""

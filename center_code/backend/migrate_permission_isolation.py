@@ -12,9 +12,17 @@ from models import User, USER_ROLE_SUPER_ADMIN
 
 
 def get_super_admin_id(db):
+    # 优先找 super_admin，找不到就用第一个用户
     admin = db.query(User).filter(User.role == USER_ROLE_SUPER_ADMIN).first()
     if not admin:
-        raise RuntimeError('未找到 super_admin 用户，请先运行 init_user.py')
+        admin = db.query(User).order_by(User.id.asc()).first()
+    if not admin:
+        raise RuntimeError('数据库中没有任何用户，请先运行 init_user.py')
+    # 顺便把这个用户升级为 super_admin
+    if admin.role != USER_ROLE_SUPER_ADMIN:
+        admin.role = USER_ROLE_SUPER_ADMIN
+        db.commit()
+        print(f'[升级] 用户 {admin.username} (id={admin.id}) 已设置为 super_admin')
     return admin.id
 
 

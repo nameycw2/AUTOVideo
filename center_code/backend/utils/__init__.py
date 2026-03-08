@@ -32,6 +32,7 @@ try:
         get_current_user_id = backend_utils.get_current_user_id
         get_current_user_obj = backend_utils.get_current_user_obj
         get_current_user_role = getattr(backend_utils, 'get_current_user_role', None)
+        get_visible_user_ids = backend_utils.get_visible_user_ids
         create_access_token = backend_utils.create_access_token
         decode_access_token = backend_utils.decode_access_token
         model_to_dict = backend_utils.model_to_dict
@@ -65,6 +66,9 @@ except Exception as e:
         return None
 
     def get_current_user_role():
+        return None
+
+    def get_visible_user_ids(current_user):
         return None
 
     def create_access_token(user_id, username, email, role=None, parent_id=None):

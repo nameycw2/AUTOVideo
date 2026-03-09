@@ -153,6 +153,8 @@ const api = {
     start: (data) => apiClient.post('/login/start', data),
     getQrcode: (accountId) => apiClient.get(`/login/qrcode?account_id=${accountId}`),
     getStatus: (accountId) => apiClient.get(`/login/status?account_id=${accountId}`),
+    getScreenshot: (accountId) => apiClient.get(`/login/screenshot?account_id=${accountId}`),
+    interact: (accountId, action) => apiClient.post('/login/interact', { account_id: accountId, action }),
     complete: (data) => apiClient.post('/login/complete', data),
     cancel: (data) => apiClient.post('/login/cancel', data)
   },

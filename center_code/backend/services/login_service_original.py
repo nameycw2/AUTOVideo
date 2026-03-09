@@ -144,108 +144,68 @@ async def start_login_session(account_id: int, platform: str = 'douyin') -> Dict
             except Exception as e:
                 print(f"点击「立即登录」失败（可能已在登录页）: {e}")
         
-        # 小红书：默认是手机号登录，点击二维码切换图标切换到扫码登录
-        if platform == 'xiaohongshu':
-            try:
-                qr_switch = page.locator('xpath=//*[@id="page"]/div/div[2]/div[1]/div[2]/div/div/div/div/img').first
-                if await qr_switch.count() > 0:
-                    await qr_switch.click(timeout=3000)
-                    await asyncio.sleep(1)
-                    print("[xiaohongshu] 已点击二维码切换图标，等待二维码出现")
-                else:
-                    print("[xiaohongshu] 未找到二维码切换图标，可能已在扫码页面")
-            except Exception as e:
-                print(f"[xiaohongshu] 点击二维码切换图标失败: {e}")
-
-        # 尝试点击"扫码登录"按钮（小红书已单独处理，其他平台走通用逻辑）
-        if platform != 'xiaohongshu':
-            try:
-                qr_button_selectors = [
-                    'text=扫码登录',
-                    'button:has-text("扫码登录")',
-                    '[class*="qr"]',
-                    '[class*="scan"]'
-                ]
-                if platform == 'weixin':
-                    qr_button_selectors = ['text=微信扫码登录', 'text=扫码登录', 'button:has-text("扫码登录")'] + qr_button_selectors
-                elif platform == 'kuaishou':
-                    qr_button_selectors = ['text=快手扫码登录', 'text=扫码登录', 'button:has-text("扫码登录")'] + qr_button_selectors
-
-                clicked = False
-                for selector in qr_button_selectors:
-                    try:
-                        qr_button = page.locator(selector).first
-                        count = await qr_button.count()
-                        if count > 0:
-                            await qr_button.click(timeout=5000)
-                            await asyncio.sleep(2)
-                            clicked = True
-                            break
-                    except Exception as e:
-                        print(f"尝试选择器 {selector} 失败: {e}")
-                        continue
-
-                if not clicked:
-                    print("未找到扫码登录按钮，可能已经在登录页面")
-            except Exception as e:
-                print(f"点击扫码登录按钮失败: {e}")
-                # 继续尝试，可能已经在登录页面
+        # 尝试点击"扫码登录"按钮（按平台使用不同文案）
+        try:
+            qr_button_selectors = [
+                'text=扫码登录',
+                'button:has-text("扫码登录")',
+                '[class*="qr"]',
+                '[class*="scan"]'
+            ]
+            if platform == 'weixin':
+                qr_button_selectors = ['text=微信扫码登录', 'text=扫码登录', 'button:has-text("扫码登录")'] + qr_button_selectors
+            elif platform == 'kuaishou':
+                qr_button_selectors = ['text=快手扫码登录', 'text=扫码登录', 'button:has-text("扫码登录")'] + qr_button_selectors
+            
+            clicked = False
+            for selector in qr_button_selectors:
+                try:
+                    qr_button = page.locator(selector).first
+                    count = await qr_button.count()
+                    if count > 0:
+                        await qr_button.click(timeout=5000)
+                        await asyncio.sleep(2)
+                        clicked = True
+                        break
+                except Exception as e:
+                    print(f"尝试选择器 {selector} 失败: {e}")
+                    continue
+            
+            if not clicked:
+                print("未找到扫码登录按钮，可能已经在登录页面")
+        except Exception as e:
+            print(f"点击扫码登录按钮失败: {e}")
+            # 继续尝试，可能已经在登录页面
         
         # 查找二维码图片
         qrcode_base64 = None
         sms_required = False
         max_retries = 10
-
-        # 按平台定制优先选择器
-        platform_qr_selectors = {
-            'douyin': [
-                'xpath=//*[@id="animate_qrcode_container"]/div[2]/img',
-            ],
-            'xiaohongshu': [
-                'xpath=//*[@id="page"]/div/div[2]/div[1]/div[2]/div/div/div/div/div/div[2]/img',
-            ],
-            'weixin': [
-                'img.qrcode',
-                '[class*="qrcode"] img',
-            ],
-            'kuaishou': [
-                '[class*="qrcode"] img',
-                '[class*="qr-code"] img',
-            ],
-            'tiktok': [
-                '[class*="qrcode"] img',
-                'canvas',
-            ],
-        }
-        qr_selectors = platform_qr_selectors.get(platform, []) + [
-            'img[alt*="二维码"]',
-            'img[alt*="QR"]',
-            '.qrcode img',
-            '.qr-code img',
-            '[class*="qrcode"] img',
-            '[class*="qr-code"] img',
-            'canvas',
-        ]
-
         for i in range(max_retries):
             try:
+                # 尝试多种选择器来查找二维码
+                qr_selectors = [
+                    'img[alt*="二维码"]',
+                    'img[alt*="QR"]',
+                    '.qrcode img',
+                    '.qr-code img',
+                    '[class*="qrcode"] img',
+                    '[class*="qr-code"] img',
+                    'canvas',
+                ]
+                
                 for selector in qr_selectors:
                     qr_element = page.locator(selector).first
                     if await qr_element.count() > 0:
-                        # 等待元素可见，超时短一点，失败了也继续截图
-                        try:
-                            await qr_element.wait_for(state='visible', timeout=2000)
-                        except Exception:
-                            pass
-                        qrcode_bytes = await qr_element.screenshot(type='png')
-                        if qrcode_bytes:
-                            qrcode_base64 = base64.b64encode(qrcode_bytes).decode('utf-8')
-                            print(f"[{platform}] 二维码截图成功，使用选择器: {selector}")
+                        # 获取二维码图片的base64
+                        qrcode_base64 = await qr_element.screenshot(type='png')
+                        if qrcode_base64:
+                            qrcode_base64 = base64.b64encode(qrcode_base64).decode('utf-8')
                             break
-
+                
                 if qrcode_base64:
                     break
-
+                    
                 await asyncio.sleep(1)
             except Exception as e:
                 print(f"查找二维码失败 (尝试 {i+1}/{max_retries}): {e}")
@@ -260,18 +220,8 @@ async def start_login_session(account_id: int, platform: str = 'douyin') -> Dict
             except Exception:
                 sms_required = False
 
-        # 兜底：截整页图发给前端
-        if not qrcode_base64:
-            try:
-                print(f"[{platform}] 截取整页作为{'sms' if sms_required else '兜底二维码'}截图")
-                full_page_bytes = await page.screenshot(type='png', full_page=False)
-                if full_page_bytes:
-                    qrcode_base64 = base64.b64encode(full_page_bytes).decode('utf-8')
-                    print(f"[{platform}] 整页截图成功")
-            except Exception as e:
-                print(f"[{platform}] 整页截图失败: {e}")
-
         if not qrcode_base64 and not sms_required:
+            # 二维码模式下必须真实拿到二维码，避免前端未展示二维码就进入“登录成功”流程
             try:
                 await context.close()
             except Exception:
@@ -360,7 +310,7 @@ async def check_login_status(account_id: int) -> Dict:
         }
 
     def _allow_logged_in_transition() -> bool:
-        # 二维码模式下，必须先出现"已扫描"阶段，才允许判定成功
+        # 二维码模式下，必须先出现“已扫描”阶段，才允许判定成功
         if session.get('login_mode') == 'qrcode':
             return bool(session.get('scan_seen'))
         return True
@@ -825,83 +775,5 @@ def cleanup_login_session_sync(account_id: int):
         print(f"清理登录会话失败: {e}")
         import traceback
         traceback.print_exc()
+        # 即便异步清理超时，也要强制移除内存会话，防止脏状态残留
         login_sessions.pop(account_id, None)
-
-
-async def screenshot_session(account_id: int) -> Optional[str]:
-    """截取当前登录会话页面，返回 base64 字符串"""
-    if account_id not in login_sessions:
-        return None
-    session = login_sessions[account_id]
-    page = session.get('page')
-    if not page:
-        return None
-    try:
-        data = await page.screenshot(type='png', full_page=False)
-        return base64.b64encode(data).decode('utf-8')
-    except Exception as e:
-        print(f"截图失败: {e}")
-        return None
-
-
-def screenshot_session_sync(account_id: int) -> Optional[str]:
-    """同步包装"""
-    try:
-        loop = get_or_create_loop()
-        if loop is None or loop.is_closed():
-            return asyncio.run(screenshot_session(account_id))
-        future = asyncio.run_coroutine_threadsafe(screenshot_session(account_id), loop)
-        return future.result(timeout=15)
-    except Exception as e:
-        print(f"截图失败: {e}")
-        return None
-
-
-async def interact_session(account_id: int, action: dict) -> bool:
-    """
-    对登录会话页面执行交互操作
-    action 格式：
-      { "type": "click", "x": 320, "y": 240 }
-      { "type": "type", "text": "123456" }
-      { "type": "key", "key": "Enter" }
-      { "type": "scroll", "x": 0, "y": 300 }
-    """
-    if account_id not in login_sessions:
-        return False
-    page = login_sessions[account_id].get('page')
-    if not page:
-        return False
-    try:
-        action_type = action.get('type')
-        if action_type == 'click':
-            await page.mouse.click(float(action['x']), float(action['y']))
-        elif action_type == 'type':
-            await page.keyboard.type(str(action['text']))
-        elif action_type == 'key':
-            await page.keyboard.press(str(action['key']))
-        elif action_type == 'scroll':
-            await page.mouse.wheel(float(action.get('x', 0)), float(action.get('y', 0)))
-        return True
-    except Exception as e:
-        print(f"交互操作失败: {e}")
-        return False
-
-
-def interact_session_sync(account_id: int, action: dict) -> bool:
-    """同步包装"""
-    try:
-        loop = get_or_create_loop()
-        if loop is None or loop.is_closed():
-            return asyncio.run(interact_session(account_id, action))
-        future = asyncio.run_coroutine_threadsafe(interact_session(account_id, action), loop)
-        return future.result(timeout=15)
-    except Exception as e:
-        print(f"交互操作失败: {e}")
-        return False
-
-
-def get_session_viewport(account_id: int) -> dict:
-    """获取当前会话的浏览器视口尺寸"""
-    if account_id not in login_sessions:
-        return {'width': 1280, 'height': 720}
-    return {'width': 1280, 'height': 720}

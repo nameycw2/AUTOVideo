@@ -1,10 +1,11 @@
 """
 登录相关API（二维码等）
 """
-from flask import Blueprint, request
+from flask import Blueprint, request, Response, stream_with_context
 import sys
 import os
 import json
+import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import response_success, response_error, login_required
 from models import Account
@@ -14,8 +15,12 @@ from services.login_service import (
     start_login_session_sync,
     check_login_status_sync,
     get_cookies_from_session_sync,
-    cleanup_login_session_sync
+    cleanup_login_session_sync,
+    screenshot_session_sync,
+    interact_session_sync,
+    get_session_viewport,
 )
+from utils import decode_access_token
 
 login_bp = Blueprint('login', __name__, url_prefix='/api/login')
 
@@ -342,6 +347,113 @@ def cancel_login():
         return response_success({
             'account_id': account_id
         }, '登录已取消')
-        
+
     except Exception as e:
         return response_error(str(e), 500)
+
+
+@login_bp.route('/screenshot', methods=['GET'])
+@login_required
+def get_screenshot():
+    """
+    获取当前登录会话的页面截图（用于手机号验证码等需要用户看到浏览器的场景）
+
+    查询参数:
+        account_id (int): 账号ID
+    """
+    try:
+        account_id = request.args.get('account_id', type=int)
+        if not account_id:
+            return response_error('account_id is required', 400)
+
+        screenshot = screenshot_session_sync(account_id)
+        if not screenshot:
+            return response_error('截图失败，会话可能已关闭', 400)
+
+        return response_success({
+            'screenshot': screenshot,
+            'account_id': account_id
+        }, '截图成功')
+    except Exception as e:
+        return response_error(str(e), 500)
+
+
+@login_bp.route('/interact', methods=['POST'])
+@login_required
+def interact():
+    """
+    向登录会话页面发送交互操作（点击/输入/按键/滚动）
+    请求体: { "account_id": int, "action": { "type": "click", "x": 320, "y": 240 } }
+    返回: { "screenshot": "<base64>", "width": 1280, "height": 720 }
+    """
+    try:
+        data = request.json or {}
+        account_id = data.get('account_id')
+        action = data.get('action')
+        if not account_id:
+            return response_error('account_id is required', 400)
+        if not action or not action.get('type'):
+            return response_error('action is required', 400)
+
+        ok = interact_session_sync(account_id, action)
+        if not ok:
+            return response_error('交互失败，会话可能已关闭', 400)
+
+        # 交互后立即截图返回最新画面
+        screenshot = screenshot_session_sync(account_id)
+        viewport = get_session_viewport(account_id)
+        return response_success({
+            'screenshot': screenshot,
+            'width': viewport['width'],
+            'height': viewport['height'],
+        })
+    except Exception as e:
+        return response_error(str(e), 500)
+
+
+@login_bp.route('/stream', methods=['GET'])
+def stream_browser():
+    """
+    SSE 截图流，每 300ms 推一帧浏览器截图。
+    SSE 不支持自定义 header，token 通过 query param 传递。
+    查询参数: account_id (int), token (str)
+    """
+    # 手动鉴权（SSE 无法用 @login_required）
+    token = request.args.get('token', '')
+    if not token:
+        return Response('Unauthorized', status=401)
+    try:
+        payload = decode_access_token(token)
+        if not payload or not payload.get('user_id'):
+            return Response('Unauthorized', status=401)
+    except Exception:
+        return Response('Unauthorized', status=401)
+
+    account_id = request.args.get('account_id', type=int)
+    if not account_id:
+        return Response('account_id is required', status=400)
+
+    def generate():
+        viewport = get_session_viewport(account_id)
+        while True:
+            screenshot = screenshot_session_sync(account_id)
+            if screenshot is None:
+                # 会话已关闭，推一个结束事件
+                yield 'event: close\ndata: {}\n\n'
+                break
+            payload = json.dumps({
+                'screenshot': screenshot,
+                'width': viewport['width'],
+                'height': viewport['height'],
+            })
+            yield f'data: {payload}\n\n'
+            time.sleep(0.3)
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',  # 禁用 nginx 缓冲
+        }
+    )

@@ -213,12 +213,12 @@ if _server_port:
     try:
         SERVER_PORT = int(_server_port)
     except ValueError:
-        print(f"⚠️  警告: SERVER_PORT 或 PORT 环境变量的值 '{_server_port}' 无效，使用默认端口 8080")
-        SERVER_PORT = 8080
+        print(f"⚠️  警告: SERVER_PORT 或 PORT 环境变量的值 '{_server_port}' 无效，使用默认端口 8081")
+        SERVER_PORT = 8081
 else:
     # 如果未设置，使用默认值并提示
-    SERVER_PORT = 8080
-    print("ℹ️  提示: 未设置 SERVER_PORT 或 PORT 环境变量，使用默认端口 8080")
+    SERVER_PORT = 8081
+    print("ℹ️  提示: 未设置 SERVER_PORT 或 PORT 环境变量，使用默认端口 8081")
     print("   建议在 .env 文件中配置: SERVER_PORT=8081")
     print("   同时在前端 .env 文件中配置: VITE_BACKEND_PORT=8081")
 

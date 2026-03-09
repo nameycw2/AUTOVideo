@@ -1,11 +1,37 @@
 """
 数据模型定义
 """
+import base64
+import hashlib
+import hmac
+
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Index, Text, Float, REAL, Boolean
 from sqlalchemy.orm import declarative_base
 from werkzeug.security import generate_password_hash, check_password_hash
 
 Base = declarative_base()
+
+
+def _check_scrypt_password_hash(password_hash: str, password: str) -> bool:
+    """兼容校验 werkzeug scrypt 哈希：scrypt:n:r:p$salt$hash"""
+    try:
+        method, salt, hashval = password_hash.split("$", 2)
+        if not method.startswith("scrypt:"):
+            return False
+
+        _, n, r, p = method.split(":", 3)
+        expected = base64.b64decode(hashval.encode("utf-8"))
+        actual = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=salt.encode("utf-8"),
+            n=int(n),
+            r=int(r),
+            p=int(p),
+            dklen=len(expected),
+        )
+        return hmac.compare_digest(actual, expected)
+    except Exception:
+        return False
 
 
 # 用户角色：super_admin=超级管理员, parent=母账号, child=子账号
@@ -36,11 +62,16 @@ class User(Base):
     
     def set_password(self, password):
         """设置密码（加密）"""
-        self.password_hash = generate_password_hash(password)
+        self.password_hash = generate_password_hash(password, method='pbkdf2:sha256:600000')
     
     def check_password(self, password):
         """验证密码"""
-        return check_password_hash(self.password_hash, password)
+        try:
+            return check_password_hash(self.password_hash, password)
+        except ValueError as e:
+            if "unsupported hash type scrypt" in str(e).lower():
+                return _check_scrypt_password_hash(self.password_hash, password)
+            return False
 
 
 class EmailVerification(Base):
@@ -58,24 +89,26 @@ class EmailVerification(Base):
 class Device(Base):
     """设备表"""
     __tablename__ = 'devices'
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     device_id = Column(String(255), unique=True, nullable=False, index=True)
     device_name = Column(String(255))
     ip_address = Column(String(50))
     status = Column(String(50), default='offline')
     last_heartbeat = Column(DateTime)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
     created_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now())
-    updated_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now(), 
+    updated_at = Column(DateTime, default=lambda: __import__('datetime').datetime.now(),
                        onupdate=lambda: __import__('datetime').datetime.now())
 
 
 class Account(Base):
     """账号表"""
     __tablename__ = 'accounts'
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     device_id = Column(Integer, ForeignKey('devices.id'), nullable=False)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
     account_name = Column(String(255), nullable=False, index=True)
     platform = Column(String(50), default='douyin')
     cookie_file_path = Column(String(500))
@@ -94,12 +127,16 @@ class VideoTask(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
     device_id = Column(Integer, ForeignKey('devices.id'), nullable=False)
+    plan_video_id = Column(Integer, ForeignKey('plan_videos.id'), nullable=True, index=True)
     video_url = Column(String(1000), nullable=False)
     video_title = Column(String(500))
     video_description = Column(Text)  # 正文/描述，与 video_title、video_tags 一起用于发布
     video_tags = Column(String(500))
     publish_date = Column(DateTime)
     thumbnail_url = Column(String(1000))
+    after_publish_actions = Column(Text, nullable=True)  # JSON list: ["auto_comment","auto_like","auto_share"]
+    after_publish_comment = Column(String(500), nullable=True)
+    after_publish_result = Column(Text, nullable=True)  # JSON execution result
     status = Column(String(50), default='pending')
     progress = Column(Integer, default=0)
     error_message = Column(Text)
@@ -156,8 +193,9 @@ class Message(Base):
 class PublishPlan(Base):
     """发布计划表"""
     __tablename__ = 'publish_plans'
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
     plan_name = Column(String(255), nullable=False)
     platform = Column(String(50), default='douyin')
     merchant_id = Column(Integer, ForeignKey('merchants.id'), nullable=True)
@@ -194,9 +232,10 @@ class PlanVideo(Base):
 class Merchant(Base):
     """商家表"""
     __tablename__ = 'merchants'
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
-    merchant_name = Column(String(255), nullable=False, unique=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
+    merchant_name = Column(String(255), nullable=False)
     contact_person = Column(String(100))
     contact_phone = Column(String(50))
     contact_email = Column(String(100))
@@ -247,8 +286,9 @@ class AccountStats(Base):
 class Material(Base):
     """素材表（视频/音频素材）"""
     __tablename__ = 'materials'
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)  # NULL=公共素材（管理员提供）
     name = Column(String(255), nullable=False)  # 文件名
     status = Column(String(50), default='ready')  # ready/processing/failed
     path = Column(String(500), nullable=True)  # 当前可用的文件路径（相对 BASE_DIR）
@@ -333,4 +373,3 @@ Index('idx_video_edit_tasks_update_time', VideoEditTask.updated_at)
 
 Index('idx_material_transcode_tasks_status_time', MaterialTranscodeTask.status, MaterialTranscodeTask.created_at)
 Index('idx_material_transcode_tasks_lock', MaterialTranscodeTask.status, MaterialTranscodeTask.locked_at)
-

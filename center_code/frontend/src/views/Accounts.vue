@@ -105,14 +105,21 @@
         <p style="margin-top: 20px; color: #666;">正在启动浏览器...</p>
       </div>
       
-      <div v-else-if="loginStatus === 'waiting' || loginStatus === 'scanning'" style="text-align: center; padding: 40px;">
-        <el-icon style="font-size: 48px; color: #409eff;"><Loading /></el-icon>
+      <div v-else-if="loginStatus === 'waiting' || loginStatus === 'scanning' || loginStatus === 'sms_required'" style="text-align: center; padding: 40px;">
+        <el-image
+          v-if="loginQrcodeImage"
+          :src="loginQrcodeImage"
+          style="width: 240px; height: 240px; margin: 0 auto 16px; border: 1px solid #ebeef5; border-radius: 8px;"
+          fit="contain"
+        />
+        <el-icon v-else style="font-size: 48px; color: #409eff;"><Loading /></el-icon>
         <p style="margin-top: 20px; color: #666; font-size: 16px;">
           <span v-if="loginStatus === 'waiting'">等待用户扫码登录...</span>
           <span v-else-if="loginStatus === 'scanning'">已扫描，等待用户确认登录...</span>
+          <span v-else-if="loginStatus === 'sms_required'">检测到手机号验证码登录，请在浏览器中完成验证...</span>
         </p>
         <p style="margin-top: 10px; color: #999; font-size: 14px;">
-          {{ currentLoginAccount?.platform === 'xiaohongshu' ? '请使用小红书APP扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'weixin' ? '请使用微信扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'kuaishou' ? '请使用快手APP扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'tiktok' ? '请在浏览器中完成 TikTok 登录（邮箱/手机/第三方）' : '请使用抖音APP扫描浏览器中的二维码完成登录' }}
+          {{ loginStatus === 'sms_required' ? '请在已拉起的浏览器页面输入手机号与验证码，完成后此窗口会自动变为登录成功。' : (currentLoginAccount?.platform === 'xiaohongshu' ? '请使用小红书APP扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'weixin' ? '请使用微信扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'kuaishou' ? '请使用快手APP扫描浏览器中的二维码完成登录' : currentLoginAccount?.platform === 'tiktok' ? '请在浏览器中完成 TikTok 登录（邮箱/手机/第三方）' : '请使用抖音APP扫描浏览器中的二维码完成登录') }}
         </p>
       </div>
       
@@ -150,8 +157,10 @@ const currentAccount = ref(null)
 // 登录对话框相关
 const loginDialogVisible = ref(false)
 const currentLoginAccount = ref(null)
-const loginStatus = ref('loading') // loading, waiting, scanning, logged_in, failed
+const loginStatus = ref('loading') // loading, waiting, scanning, sms_required, logged_in, failed
 const loginErrorMessage = ref('')
+const loginQrcodeImage = ref('')
+const loginRequesting = ref(false)
 let loginStatusPollTimer = null
 
 const filters = ref({
@@ -234,20 +243,33 @@ const handleEdit = (row) => {
 }
 
 const handleLogin = async (row) => {
+  if (loginRequesting.value) {
+    return
+  }
   try {
+    loginRequesting.value = true
     currentLoginAccount.value = row
     loginDialogVisible.value = true
     loginStatus.value = 'loading'
     loginErrorMessage.value = ''
+    loginQrcodeImage.value = ''
     
     // 启动登录会话（后端会自动打开浏览器）
     const response = await api.login.getQrcode(row.id)
     
     if (response.code === 200) {
-      loginStatus.value = 'waiting'
+      const initialStatus = response.data?.status || 'waiting'
+      loginStatus.value = initialStatus
+      if (response.data?.qrcode) {
+        loginQrcodeImage.value = `data:image/png;base64,${response.data.qrcode}`
+      }
       // 开始轮询登录状态
       startLoginStatusPolling(row.id)
-      ElMessage.success('浏览器已打开，请扫码登录')
+      if (initialStatus === 'sms_required') {
+        ElMessage.info('检测到手机号验证码登录，请在浏览器中完成验证')
+      } else {
+        ElMessage.success('二维码已生成，请扫码登录')
+      }
     } else {
       loginStatus.value = 'failed'
       loginErrorMessage.value = response.message || '启动登录失败'
@@ -258,6 +280,8 @@ const handleLogin = async (row) => {
     loginStatus.value = 'failed'
     loginErrorMessage.value = error.message || '启动登录失败'
     ElMessage.error(loginErrorMessage.value)
+  } finally {
+    loginRequesting.value = false
   }
 }
 
@@ -355,6 +379,7 @@ const cancelLogin = async () => {
   currentLoginAccount.value = null
   loginStatus.value = 'loading'
   loginErrorMessage.value = ''
+  loginQrcodeImage.value = ''
 }
 
 // 重试登录

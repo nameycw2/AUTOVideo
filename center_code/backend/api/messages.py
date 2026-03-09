@@ -6,7 +6,7 @@ from datetime import datetime
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import response_success, response_error, login_required
+from utils import response_success, response_error, login_required, get_current_user_obj, get_visible_user_ids
 from models import Message, Account
 from db import get_db
 
@@ -77,9 +77,16 @@ def get_messages():
         user_name = request.args.get('user_name')
         limit = request.args.get('limit', type=int, default=100)
         offset = request.args.get('offset', type=int, default=0)
-        
+
+        current_user = get_current_user_obj()
+        if not current_user:
+            return response_error('请先登录', 401)
+        visible_ids = get_visible_user_ids(current_user)
+
         with get_db() as db:
-            query = db.query(Message)
+            query = db.query(Message).join(Account, Message.account_id == Account.id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
             
             if account_id:
                 query = query.filter(Message.account_id == account_id)
@@ -236,13 +243,26 @@ def delete_message(message_id):
     try:
         with get_db() as db:
             message = db.query(Message).filter(Message.id == message_id).first()
-            
+
             if not message:
                 return response_error('Message not found', 404)
-            
+
+            # 验证归属权
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+            if visible_ids is not None:
+                account = db.query(Account).filter(
+                    Account.id == message.account_id,
+                    Account.user_id.in_(visible_ids)
+                ).first()
+                if not account:
+                    return response_error('Message not found', 404)
+
             db.delete(message)
             db.commit()
-            
+
             return response_success({'message_id': message_id}, 'Message deleted successfully')
     except Exception as e:
         return response_error(str(e), 500)
@@ -289,18 +309,26 @@ def clear_messages():
     try:
         data = request.json
         account_id = data.get('account_id')
-        
+
         if not account_id:
             return response_error('account_id is required', 400)
-        
+
         with get_db() as db:
-            account = db.query(Account).filter(Account.id == account_id).first()
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(Account).filter(Account.id == account_id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
+            account = query.first()
             if not account:
                 return response_error('Account not found', 404)
-            
+
             count = db.query(Message).filter(Message.account_id == account_id).delete()
             db.commit()
-            
+
             return response_success({
                 'account_id': account_id,
                 'deleted_count': count

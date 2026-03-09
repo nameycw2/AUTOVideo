@@ -20,6 +20,24 @@ from services.login_service import (
 login_bp = Blueprint('login', __name__, url_prefix='/api/login')
 
 
+def _persist_account_cookies(account_id: int, cookies_obj):
+    if not cookies_obj:
+        return False, '无法获取cookies，请确保已登录'
+
+    with get_db() as db:
+        account = db.query(Account).filter(Account.id == account_id).first()
+        if not account:
+            return False, 'Account not found'
+
+        cookies_json = json.dumps(cookies_obj, ensure_ascii=False)
+        account.cookies = cookies_json
+        account.login_status = 'logged_in'
+        account.last_login_time = datetime.now()
+        account.updated_at = datetime.now()
+        db.commit()
+    return True, None
+
+
 @login_bp.route('/start', methods=['POST'])
 @login_required
 def start_login():
@@ -131,7 +149,9 @@ def get_login_qrcode():
         if result['success']:
             return response_success({
                 'qrcode': result['qrcode'],
-                'account_id': account_id
+                'account_id': account_id,
+                'status': result.get('status', 'waiting'),
+                'login_mode': result.get('login_mode', 'qrcode')
             }, result['message'])
         else:
             return response_error(result['message'], 500)
@@ -223,6 +243,11 @@ def complete_login():
         
         if not account_id:
             return response_error('account_id is required', 400)
+
+        # 仅当登录会话已确认成功时才允许完成并落库
+        status_result = check_login_status_sync(account_id)
+        if status_result.get('status') != 'logged_in':
+            return response_error(status_result.get('message') or '登录尚未完成，请先扫码确认', 400)
         
         # 获取cookies
         cookies = get_cookies_from_session_sync(account_id)
@@ -230,21 +255,9 @@ def complete_login():
         if not cookies:
             return response_error('无法获取cookies，请确保已登录', 400)
         
-        # 保存cookies到数据库
-        with get_db() as db:
-            account = db.query(Account).filter(Account.id == account_id).first()
-            if not account:
-                return response_error('Account not found', 404)
-            
-            # 将cookies转换为JSON字符串
-            cookies_json = json.dumps(cookies, ensure_ascii=False)
-            
-            # 更新账号信息
-            account.cookies = cookies_json
-            account.login_status = 'logged_in'
-            account.last_login_time = datetime.now()
-            account.updated_at = datetime.now()
-            db.commit()
+        ok, err = _persist_account_cookies(account_id, cookies)
+        if not ok:
+            return response_error(err, 404 if err == 'Account not found' else 400)
         
         # 清理登录会话
         cleanup_login_session_sync(account_id)
@@ -254,6 +267,39 @@ def complete_login():
             'login_status': 'logged_in'
         }, '登录完成，cookies已保存')
         
+    except Exception as e:
+        return response_error(str(e), 500)
+
+
+@login_bp.route('/complete_local', methods=['POST'])
+@login_required
+def complete_login_local():
+    """
+    本地代理回传 cookies 后直接入库。
+    请求体:
+      {
+        "account_id": int,
+        "cookies": object
+      }
+    """
+    try:
+        data = request.json or {}
+        account_id = data.get('account_id')
+        cookies = data.get('cookies')
+
+        if not account_id:
+            return response_error('account_id is required', 400)
+        if not cookies:
+            return response_error('cookies is required', 400)
+
+        ok, err = _persist_account_cookies(account_id, cookies)
+        if not ok:
+            return response_error(err, 404 if err == 'Account not found' else 400)
+
+        return response_success({
+            'account_id': account_id,
+            'login_status': 'logged_in'
+        }, '登录完成，cookies已保存')
     except Exception as e:
         return response_error(str(e), 500)
 
@@ -299,4 +345,3 @@ def cancel_login():
         
     except Exception as e:
         return response_error(str(e), 500)
-

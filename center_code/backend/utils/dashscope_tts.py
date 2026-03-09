@@ -100,6 +100,8 @@ def list_voices_for_frontend() -> List[Dict[str, Any]]:
             )
         except Exception:
             continue
+    if not out:
+        return [{"id": 0, "key": "default", "name": "默认音色"}]
     return out
 
 

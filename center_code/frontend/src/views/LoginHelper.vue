@@ -66,6 +66,14 @@
               </template>
             </el-alert>
           </div>
+          <div v-else-if="loginStatus === 'sms_required'">
+            <el-alert type="info" :closable="false" style="margin: 10px 0;">
+              <template #title>
+                <el-icon><Loading /></el-icon>
+                检测到手机号验证码登录，请在浏览器中完成验证...
+              </template>
+            </el-alert>
+          </div>
           <div v-else-if="loginStatus === 'logged_in'">
             <el-alert type="success" :closable="false" style="margin: 10px 0;">
               <template #title>
@@ -114,7 +122,7 @@ const loadingQrcode = ref(false)
 const qrcodeImage = ref(null)
 const qrcodeError = ref(null)
 const qrcodeLoaded = ref(false)
-const loginStatus = ref('waiting') // waiting, scanning, logged_in, failed
+const loginStatus = ref('waiting') // waiting, scanning, sms_required, logged_in, failed
 const statusMessage = ref('')
 const submitting = ref(false)
 const submitStatus = ref(null)
@@ -162,15 +170,22 @@ const getQrcode = async () => {
   try {
     const response = await api.login.getQrcode(accountId.value)
     
-    if (response.code === 200 && response.data && response.data.qrcode) {
-      qrcodeImage.value = `data:image/png;base64,${response.data.qrcode}`
-      qrcodeLoaded.value = true
+    if (response.code === 200 && response.data) {
+      if (response.data.qrcode) {
+        qrcodeImage.value = `data:image/png;base64,${response.data.qrcode}`
+        qrcodeLoaded.value = true
+      }
+      loginStatus.value = response.data.status || 'waiting'
       currentStep.value = 2
       
       // 开始轮询登录状态
       startPollingStatus()
       
-      ElMessage.success('二维码获取成功，请扫码登录')
+      if (loginStatus.value === 'sms_required') {
+        ElMessage.info('检测到手机号验证码登录，请在浏览器中完成验证')
+      } else {
+        ElMessage.success('二维码获取成功，请扫码登录')
+      }
     } else {
       qrcodeError.value = response.message || '获取二维码失败'
       ElMessage.error(qrcodeError.value)

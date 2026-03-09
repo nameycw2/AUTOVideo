@@ -6,7 +6,7 @@ from datetime import datetime
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import response_success, response_error, login_required
+from utils import response_success, response_error, login_required, get_current_user_obj, get_visible_user_ids
 from models import ListenTask, Account
 from db import get_db
 
@@ -68,7 +68,15 @@ def create_listen_task():
             return response_error('action must be "start" or "stop"', 400)
         
         with get_db() as db:
-            account = db.query(Account).filter(Account.id == account_id).first()
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(Account).filter(Account.id == account_id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
+            account = query.first()
             if not account:
                 return response_error('Account not found', 404)
             
@@ -136,9 +144,16 @@ def get_listen_tasks():
     try:
         account_id = request.args.get('account_id', type=int)
         status = request.args.get('status')
-        
+
+        current_user = get_current_user_obj()
+        if not current_user:
+            return response_error('请先登录', 401)
+        visible_ids = get_visible_user_ids(current_user)
+
         with get_db() as db:
-            query = db.query(ListenTask)
+            query = db.query(ListenTask).join(Account, ListenTask.account_id == Account.id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
             
             if account_id:
                 query = query.filter(ListenTask.account_id == account_id)
@@ -225,8 +240,16 @@ def listen_task_detail(task_id):
     """
     try:
         with get_db() as db:
-            task = db.query(ListenTask).filter(ListenTask.id == task_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(ListenTask).join(Account, ListenTask.account_id == Account.id).filter(ListenTask.id == task_id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
+            task = query.first()
+
             if not task:
                 return response_error('Task not found', 404)
             

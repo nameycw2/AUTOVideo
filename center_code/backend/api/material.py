@@ -13,7 +13,7 @@ from datetime import datetime
 from werkzeug.utils import secure_filename
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import response_success, response_error, login_required
+from utils import response_success, response_error, login_required, get_current_user_obj, get_visible_user_ids
 from models import Material, MaterialTranscodeTask
 from db import get_db
 from media_utils import ffprobe, summarize_probe, decide_transcode, get_duration_seconds
@@ -102,10 +102,14 @@ def upload_material():
     try:
         if 'file' not in request.files:
             return response_error('未选择文件', 400)
-        
+
         file = request.files['file']
         if file.filename.strip() == '':
             return response_error('文件名不能为空', 400)
+
+        current_user = get_current_user_obj()
+        if not current_user:
+            return response_error('请先登录', 401)
         
         # 图片：仍用扩展名判定；视频/音频：用 ffprobe 判定（不要只靠扩展名）
         filename = file.filename
@@ -187,6 +191,7 @@ def upload_material():
                     return response_error('该文件路径已存在', 409)
 
                 material = Material(
+                    user_id=current_user.id,
                     name=filename,
                     path=relative_path,
                     type=file_type,
@@ -274,6 +279,7 @@ def upload_material():
                     return response_error('该文件路径已存在', 409)
 
                 material = Material(
+                    user_id=current_user.id,
                     name=filename,
                     path=relative_path,
                     original_path=None,
@@ -318,6 +324,7 @@ def upload_material():
                 return response_error('该文件路径已存在', 409)
 
             material = Material(
+                user_id=current_user.id,
                 name=filename,
                 path=output_rel,
                 original_path=input_rel,
@@ -404,14 +411,25 @@ def get_materials():
     """
     try:
         material_type = request.args.get('type')
-        include_invalid = request.args.get('include_invalid', 'false').lower() == 'true'  # 是否包含无效素材
-        
+        include_invalid = request.args.get('include_invalid', 'false').lower() == 'true'
+
+        current_user = get_current_user_obj()
+        if not current_user:
+            return response_error('请先登录', 401)
+        visible_ids = get_visible_user_ids(current_user)
+
         with get_db() as db:
             query = db.query(Material)
-            
+            # 过滤：用户自己的素材 OR 公共素材（user_id IS NULL）
+            if visible_ids is not None:
+                from sqlalchemy import or_
+                query = query.filter(
+                    or_(Material.user_id.in_(visible_ids), Material.user_id.is_(None))
+                )
+
             if material_type:
                 query = query.filter(Material.type == material_type)
-            
+
             materials = query.order_by(Material.created_at.desc()).all()
             
             materials_list = []
@@ -547,13 +565,31 @@ def clear_materials():
                 delete_errors.append(f"{dir_path}: {e}")
         
         # 删除数据库记录（含转码任务）
+        # 只删除当前用户的素材（super_admin 可清空所有）
         deleted_rows = 0
         with get_db() as db:
-            try:
-                db.query(MaterialTranscodeTask).delete()
-            except Exception:
-                pass
-            deleted_rows = db.query(Material).delete()
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            from models import USER_ROLE_SUPER_ADMIN
+            if current_user.role == USER_ROLE_SUPER_ADMIN:
+                # super_admin 清空所有
+                try:
+                    db.query(MaterialTranscodeTask).delete()
+                except Exception:
+                    pass
+                deleted_rows = db.query(Material).delete()
+            else:
+                # 普通用户只清空自己的
+                own_ids = [m.id for m in db.query(Material.id).filter(Material.user_id == current_user.id).all()]
+                if own_ids:
+                    try:
+                        db.query(MaterialTranscodeTask).filter(
+                            MaterialTranscodeTask.material_id.in_(own_ids)
+                        ).delete(synchronize_session=False)
+                    except Exception:
+                        pass
+                    deleted_rows = db.query(Material).filter(Material.user_id == current_user.id).delete()
             db.commit()
 
         # Re-create required folders after clearing (keep server running without restart)
@@ -666,22 +702,37 @@ def delete_material():
             return response_error('material_id 必须是整数', 400)
         
         with get_db() as db:
-            material = db.query(Material).filter(Material.id == material_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(Material).filter(Material.id == material_id)
+            if visible_ids is not None:
+                from sqlalchemy import or_
+                query = query.filter(
+                    or_(Material.user_id.in_(visible_ids), Material.user_id.is_(None))
+                )
+            material = query.first()
+
             if not material:
                 return response_error('素材不存在', 404)
-            
+
+            # 公共素材（user_id IS NULL）只有 super_admin 可删除
+            from models import USER_ROLE_SUPER_ADMIN
+            if material.user_id is None and current_user.role != USER_ROLE_SUPER_ADMIN:
+                return response_error('无权删除公共素材', 403)
+
             # 检查是否被任务引用（如果不强制删除）
             if not force:
                 from models import VideoEditTask
-                # 检查是否有任务引用此素材
                 tasks = db.query(VideoEditTask).filter(
                     (VideoEditTask.video_ids.like(f'%{material_id}%')) |
                     (VideoEditTask.voice_id == material_id) |
                     (VideoEditTask.bgm_id == material_id)
                 ).limit(200).all()
                 tasks = [t for t in tasks if _task_references_material(t, material_id)]
-                
+
                 if tasks:
                     task_ids = [str(t.id) for t in tasks[:10]]
                     task_count = len(tasks)
@@ -689,7 +740,7 @@ def delete_material():
                         f'该素材被 {task_count} 个任务引用，无法删除。如需强制删除，请设置 force=true（任务ID示例：{",".join(task_ids)}）',
                         409
                     )
-            
+
             # 删除转码任务（如有）
             try:
                 db.query(MaterialTranscodeTask).filter(MaterialTranscodeTask.material_id == material_id).delete()
@@ -705,8 +756,8 @@ def delete_material():
                     if os.path.isfile(abs_path):
                         os.remove(abs_path)
                 except Exception:
-                    pass  # 文件删除失败不影响数据库删除
-            
+                    pass
+
             # 删除数据库记录
             db.delete(material)
             db.commit()

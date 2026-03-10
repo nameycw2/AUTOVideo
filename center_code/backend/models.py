@@ -5,7 +5,7 @@ import base64
 import hashlib
 import hmac
 
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Index, Text, Float, REAL, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Index, Text, Float, REAL, Boolean, JSON
 from sqlalchemy.orm import declarative_base
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -317,6 +317,7 @@ class VideoEditTask(Base):
     subtitle_path = Column(String(1000), nullable=True)  # 字幕文件路径
     filter_type = Column(String(50), nullable=True)  # 滤镜类型（vintage/noir/cyberpunk等）
     filter_intensity = Column(Float, default=1.0)  # 滤镜强度（0.0-1.0）
+    main_title_config = Column(JSON, nullable=True)  # 主标题配置（JSON格式：{font_size, color, stroke_color}）
     output_path = Column(String(1000), nullable=True)  # 输出文件路径（相对路径）
     output_filename = Column(String(255), nullable=True)  # 输出文件名
     preview_url = Column(String(1000), nullable=True)  # 预览URL

@@ -33,7 +33,7 @@ def hex_to_ass_color(hex_str):
 # ============================================================
 # 2. 核心转换逻辑：将纯文本SRT转换为带Header样式的ASS (新增)
 # ============================================================
-def convert_srt_to_ass_content(srt_content, style_params):
+def convert_srt_to_ass_content(srt_content, style_params, main_title_text=None, main_title_config=None):
     """
     将读取到的SRT内容转为带Style头的ASS内容，实现样式硬编码。
     style_params 可含 PlayResX/PlayResY，用于适配成片分辨率（与视频大小一致）。
@@ -50,6 +50,23 @@ def convert_srt_to_ass_content(srt_content, style_params):
     play_res_x = max(320, min(4096, play_res_x))
     play_res_y = max(320, min(4096, play_res_y))
 
+    # 可选主标题样式（顶部常驻）
+    top_title_style_line = ""
+    top_title_text = (main_title_text or "").strip()
+    top_title_cfg = main_title_config or {}
+    if top_title_text:
+        top_size_map = {"小": 48, "中": 72, "大": 96}
+        top_size_key = str(top_title_cfg.get("font_size", "中"))
+        top_size = top_size_map.get(top_size_key, 72)
+        top_color = hex_to_ass_color(top_title_cfg.get("color", "#FFFFFF"))
+        top_outline_color = hex_to_ass_color(top_title_cfg.get("stroke_color", "#000000"))
+        # Alignment=8 顶部居中，MarginV 控制离顶部距离
+        top_margin_v = max(12, round(play_res_y * 0.06))
+        top_title_style_line = (
+            f"Style: TopTitle,{font_name},{top_size},{top_color},&H000000FF,{top_outline_color},"
+            f"&H00000000,1,0,0,0,100,100,0,0,1,3,0,8,10,10,{top_margin_v},1"
+        )
+
     # ASS 模板头部：使用成片分辨率，字幕随视频大小适配
     ass_header = f"""[Script Info]
 ScriptType: v4.00+
@@ -59,11 +76,18 @@ PlayResY: {play_res_y}
 [v4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,{font_name},{font_size},{primary_color},&H000000FF,{outline_color},&H00000000,0,0,0,0,100,100,0,0,1,{outline},0,2,10,10,{margin_v},1
+{top_title_style_line}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     ass_lines = []
+    first_start = None
+    last_end = None
+
+    def _escape_ass_text(text):
+        return text.replace('\\', r'\\').replace('{', r'\{').replace('}', r'\}')
+
     # 正则拆分 SRT 块
     srt_parts = re.split(r'\n\s*\n', srt_content.strip())
     for part in srt_parts:
@@ -84,8 +108,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     start = start[1:]
                 if end.startswith("00:"):
                     end = end[1:]
-                text = "\\N".join(lines[2:])
+                text = "\\N".join(_escape_ass_text(t) for t in lines[2:])
+                if first_start is None:
+                    first_start = start
+                last_end = end
                 ass_lines.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
+
+    # 增加顶部常驻主标题（覆盖字幕时间轴）
+    if top_title_text and first_start and last_end:
+        title_line = _escape_ass_text(top_title_text)
+        ass_lines.insert(0, f"Dialogue: 0,{first_start},{last_end},TopTitle,,0,0,0,,{title_line}")
 
     return ass_header + "\n".join(ass_lines)
 
@@ -209,7 +241,7 @@ def build_subtitle_track(subtitle_url, style_params, subtitle_render_mode='effec
     builder = SubtitleEffectBuilder(subtitle_url, style_params)
     return builder.build_track()
 
-def submit_ims_task(video_url, subtitle_url, output_filename, subtitle_style=None, subtitle_render_mode='effect', voice_url=None, bgm_url=None):
+def submit_ims_task(video_url, subtitle_url, output_filename, subtitle_style=None, subtitle_render_mode='effect', voice_url=None, bgm_url=None, main_title_text=None, main_title_config=None):
     """
     提交 IMS 剪辑任务。
     subtitle_render_mode: 'effect' 使用 ASS 字幕特效，'plain' 使用仅 SRT 外挂字幕。

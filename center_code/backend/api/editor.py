@@ -2107,9 +2107,17 @@ def handle_ims_submit():
         bgm_url = data.get('bgm_url')      
         params = data.get('subtitle_params')
         params = dict(params) if params else {}
+        
+        # 🌟 【新增】：提取前端传来的主标题参数
+        main_title_text = data.get('main_title_text', '').strip()
+        main_title_config = data.get('main_title_config', {})
+
         # 字幕渲染方式：effect=字幕特效(ASS)，plain=原有逻辑(仅SRT)
         subtitle_render_mode = (data.get('subtitle_render_mode') or 'effect').strip().lower()
         if subtitle_render_mode not in ('effect', 'plain'):
+            subtitle_render_mode = 'effect'
+        if main_title_text and subtitle_render_mode == 'plain':
+            logger.info("[IMS DEBUG] 检测到主标题，plain 模式自动切换为 effect 以支持渲染")
             subtitle_render_mode = 'effect'
         # 成片分辨率，供字幕 ASS 适配视频大小（默认竖屏 1080x1920）
         if params.get('video_width') is None:
@@ -2222,7 +2230,17 @@ def handle_ims_submit():
                 if srt_content:
                     from utils.aliyun_ims import SubtitleEffectBuilder, convert_srt_to_ass_content
                     builder = SubtitleEffectBuilder("", params)
-                    ass_content = convert_srt_to_ass_content(srt_content, builder.build_style())
+                    ass_content = convert_srt_to_ass_content(
+                        srt_content,
+                        builder.build_style(),
+                        main_title_text=main_title_text,
+                        main_title_config=main_title_config
+                    )
+                    logger.info(
+                        "[IMS DEBUG] ASS 生成完成: main_title=%s, render_mode=%s",
+                        bool(main_title_text),
+                        subtitle_render_mode
+                    )
                     
                     ass_filename = pure_sub_name.replace('.srt', '.ass')
                     local_ass_path = os.path.join(SUBTITLE_DIR, ass_filename)
@@ -2253,7 +2271,10 @@ def handle_ims_submit():
             subtitle_style=params,
             subtitle_render_mode=subtitle_render_mode,
             voice_url=voice_url,
-            bgm_url=bgm_url
+            bgm_url=bgm_url,
+            # 🌟 【新增】：将主标题参数传给阿里云 IMS 处理函数
+            main_title_text=main_title_text,
+            main_title_config=main_title_config
         )
         
         if result and result.get('success'):
@@ -2267,6 +2288,8 @@ def handle_ims_submit():
                     status="running", 
                     progress=20, 
                     error_message=f"JobID:{job_id}",
+                    # 🌟 【新增】：将主标题配置存入数据库
+                    main_title_config=main_title_config if main_title_text else None,
                     created_at=datetime.datetime.now()
                 )
                 db.add(new_task)

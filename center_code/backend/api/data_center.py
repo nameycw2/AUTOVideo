@@ -7,7 +7,7 @@ import sys
 import os
 import re
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import response_success, response_error, login_required
+from utils import response_success, response_error, login_required, get_current_user_obj, get_visible_user_ids
 from models import Account, AccountStats, VideoTask
 from db import get_db
 
@@ -102,17 +102,24 @@ def get_video_stats():
         platform = request.args.get('platform')
         start_date = request.args.get('start_date')
         end_date = request.args.get('end_date')
-        
+
+        current_user = get_current_user_obj()
+        if not current_user:
+            return response_error('请先登录', 401)
+        visible_ids = get_visible_user_ids(current_user)
+
         with get_db() as db:
-            # 构建查询
+            # 构建查询，按可见范围过滤
             query = db.query(Account)
-            
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
+
             if account_id:
                 query = query.filter(Account.id == account_id)
-            
+
             if platform:
                 query = query.filter(Account.platform == platform)
-            
+
             accounts = query.all()
             
             # 统计信息
@@ -366,10 +373,16 @@ def get_account_ranking():
         platform = request.args.get('platform')
         sort_by = request.args.get('sort_by', default='total_followers')
         order = request.args.get('order', default='desc')
-        
+
+        current_user = get_current_user_obj()
+        if not current_user:
+            return response_error('请先登录', 401)
+        visible_ids = get_visible_user_ids(current_user)
+
         with get_db() as db:
-            # 查询所有账号
             query = db.query(Account)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
             if platform:
                 query = query.filter(Account.platform == platform)
             accounts = query.all()

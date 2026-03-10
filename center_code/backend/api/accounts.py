@@ -7,7 +7,7 @@ import sys
 import os
 import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import response_success, response_error, login_required, has_valid_token
+from utils import response_success, response_error, login_required, has_valid_token, get_current_user_obj, get_visible_user_ids
 from models import Account, Device, Message, VideoTask, ChatTask, ListenTask
 from db import get_db
 
@@ -65,22 +65,24 @@ def create_account():
         if not device_id_str or not account_name:
             return response_error('device_id and account_name are required', 400)
         
+        current_user = get_current_user_obj()
+        if not current_user:
+            return response_error('请先登录', 401)
+
         with get_db() as db:
             # 通过device_id（字符串）查找设备
             device = db.query(Device).filter(Device.device_id == device_id_str).first()
             if not device:
                 return response_error('Device not found. Please register device first.', 404)
-            
+
             # 检查账号名称是否已存在（账号名称必须全局唯一）
             existing_account = db.query(Account).filter(Account.account_name == account_name).first()
             if existing_account:
                 return response_error('Account name already exists', 400)
-            
-            # 检查该设备是否已经有相同平台和账号名称的账号（可选：防止重复授权）
-            # 注意：这里允许同一设备授权多个账号，只要账号名称不同即可
-            
+
             account = Account(
                 device_id=device.id,
+                user_id=current_user.id,
                 account_name=account_name,
                 platform=platform
             )
@@ -166,10 +168,18 @@ def get_accounts():
         is_device_query = device_id and not platform and not login_status and not search
         if not is_device_query and not has_valid_token():
             return response_error('请先登录', 401)
-        
+
         with get_db() as db:
             query = db.query(Account)
-            
+
+            # 设备端查询不做用户隔离；管理端查询按可见范围过滤
+            if not is_device_query:
+                current_user = get_current_user_obj()
+                if current_user:
+                    visible_ids = get_visible_user_ids(current_user)
+                    if visible_ids is not None:
+                        query = query.filter(Account.user_id.in_(visible_ids))
+
             if device_id:
                 device = db.query(Device).filter(Device.device_id == device_id).first()
                 if device:
@@ -251,11 +261,19 @@ def get_account(account_id):
     """
     try:
         with get_db() as db:
-            account = db.query(Account).filter(Account.id == account_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(Account).filter(Account.id == account_id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
+            account = query.first()
+
             if not account:
                 return response_error('Account not found', 404)
-            
+
             return response_success({
                 'id': account.id,
                 'device_id': account.device_id,
@@ -313,13 +331,21 @@ def update_account_status(account_id):
     try:
         data = request.json
         login_status = data.get('status')
-        
+
         if not login_status:
             return response_error('status is required', 400)
-        
+
         with get_db() as db:
-            account = db.query(Account).filter(Account.id == account_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(Account).filter(Account.id == account_id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
+            account = query.first()
+
             if not account:
                 return response_error('Account not found', 404)
             
@@ -378,10 +404,19 @@ def delete_account(account_id):
     """
     try:
         with get_db() as db:
-            account = db.query(Account).filter(Account.id == account_id).first()
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(Account).filter(Account.id == account_id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
+            account = query.first()
+
             if not account:
                 return response_error('Account not found', 404)
-            
+
             # 删除相关数据（级联删除）
             db.query(Message).filter(Message.account_id == account_id).delete()
             db.query(VideoTask).filter(VideoTask.account_id == account_id).delete()
@@ -449,11 +484,19 @@ def account_cookies(account_id):
     """
     try:
         with get_db() as db:
-            account = db.query(Account).filter(Account.id == account_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(Account).filter(Account.id == account_id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
+            account = query.first()
+
             if not account:
                 return response_error('Account not found', 404)
-            
+
             if request.method == 'GET':
                 return response_success({
                     'account_id': account.id,
@@ -557,11 +600,19 @@ def get_cookies_file(account_id):
     """
     try:
         with get_db() as db:
-            account = db.query(Account).filter(Account.id == account_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(Account).filter(Account.id == account_id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
+            account = query.first()
+
             if not account:
                 return response_error('Account not found', 404)
-            
+
             if not account.cookie_file_path:
                 return response_error('Cookie file path not set', 404)
             

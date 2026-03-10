@@ -7,7 +7,7 @@ from datetime import datetime
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import response_success, response_error, login_required, has_valid_token
+from utils import response_success, response_error, login_required, has_valid_token, get_current_user_obj, get_visible_user_ids
 from models import VideoTask, Account
 from db import get_db
 
@@ -75,8 +75,16 @@ def create_video_task():
             return response_error('account_id and video_url are required', 400)
         
         with get_db() as db:
-            # 检查账号是否存在，并获取关联的device_id
-            account = db.query(Account).filter(Account.id == account_id).first()
+            # 检查账号是否存在，并验证归属权
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(Account).filter(Account.id == account_id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
+            account = query.first()
             if not account:
                 return response_error('Account not found', 404)
             
@@ -171,11 +179,31 @@ def get_video_tasks():
             if not has_valid_token():
                 return response_error('请先登录', 401)
         # 设备端调用（提供了account_id和status），不需要登录
-        
+
         with get_db() as db:
             from models import PlanVideo
-            
+
             query = db.query(VideoTask)
+
+            # 管理端调用时按可见范围过滤
+            if not (account_id is not None or status is not None):
+                current_user = get_current_user_obj()
+                if current_user:
+                    visible_ids = get_visible_user_ids(current_user)
+                    if visible_ids is not None:
+                        query = query.join(Account, VideoTask.account_id == Account.id).filter(
+                            Account.user_id.in_(visible_ids)
+                        )
+            elif account_id is None:
+                # 有 status 但无 account_id 的管理端调用
+                if has_valid_token():
+                    current_user = get_current_user_obj()
+                    if current_user:
+                        visible_ids = get_visible_user_ids(current_user)
+                        if visible_ids is not None:
+                            query = query.join(Account, VideoTask.account_id == Account.id).filter(
+                                Account.user_id.in_(visible_ids)
+                            )
             
             if account_id:
                 query = query.filter(VideoTask.account_id == account_id)
@@ -298,8 +326,18 @@ def video_task_detail(task_id):
     """
     try:
         with get_db() as db:
-            task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(VideoTask).filter(VideoTask.id == task_id)
+            if visible_ids is not None:
+                query = query.join(Account, VideoTask.account_id == Account.id).filter(
+                    Account.user_id.in_(visible_ids)
+                )
+            task = query.first()
+
             if not task:
                 return response_error('Task not found', 404)
             

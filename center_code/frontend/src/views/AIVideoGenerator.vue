@@ -254,7 +254,7 @@
                 type="range" 
                 min="0" 
                 max="5" 
-                step="0.5" 
+                step="1" 
                 class="form-range"
               />
             </div>
@@ -354,7 +354,7 @@ export default {
       font_size: 60,
       text_fore_color: '#FFFFFF',
       stroke_color: '#000000',
-            stroke_width: 0.0,
+      stroke_width: 0,
       
       bgm_type: 'random',
       bgm_volume: 0.2,
@@ -416,7 +416,13 @@ export default {
           params: { language: 'zh' }
         })
         if (res.code === 200) {
-          voices.value = res.data
+          voices.value = Array.isArray(res.data) ? res.data : []
+          if (voices.value.length > 0) {
+            const exists = voices.value.some(v => String(v.id) === String(config.value.voice_name))
+            if (!exists) {
+              config.value.voice_name = voices.value[0].id
+            }
+          }
         }
       } catch (e) {
         console.error('获取音色列表失败:', e)
@@ -550,6 +556,7 @@ export default {
         
         const payload = {
           ...config.value,
+          stroke_width: Math.round(Number(config.value.stroke_width || 0)),
           video_materials: videoMaterials
         }
         
@@ -597,7 +604,7 @@ export default {
         font_size: 60,
         text_fore_color: '#FFFFFF',
         stroke_color: '#000000',
-                stroke_width: 0.0,
+        stroke_width: 0,
         
         bgm_type: 'random',
         bgm_volume: 0.2,

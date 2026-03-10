@@ -6,7 +6,7 @@ from datetime import datetime
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import response_success, response_error, login_required
+from utils import response_success, response_error, login_required, get_current_user_obj, get_visible_user_ids
 from models import ChatTask, Account
 from db import get_db
 
@@ -67,7 +67,15 @@ def create_chat_task():
             return response_error('account_id, target_user and message are required', 400)
         
         with get_db() as db:
-            account = db.query(Account).filter(Account.id == account_id).first()
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(Account).filter(Account.id == account_id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
+            account = query.first()
             if not account:
                 return response_error('Account not found', 404)
             
@@ -135,9 +143,16 @@ def get_chat_tasks():
     try:
         account_id = request.args.get('account_id', type=int)
         status = request.args.get('status')
-        
+
+        current_user = get_current_user_obj()
+        if not current_user:
+            return response_error('请先登录', 401)
+        visible_ids = get_visible_user_ids(current_user)
+
         with get_db() as db:
-            query = db.query(ChatTask)
+            query = db.query(ChatTask).join(Account, ChatTask.account_id == Account.id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
             
             if account_id:
                 query = query.filter(ChatTask.account_id == account_id)
@@ -209,8 +224,16 @@ def get_chat_task(task_id):
     """
     try:
         with get_db() as db:
-            task = db.query(ChatTask).filter(ChatTask.id == task_id).first()
-            
+            current_user = get_current_user_obj()
+            if not current_user:
+                return response_error('请先登录', 401)
+            visible_ids = get_visible_user_ids(current_user)
+
+            query = db.query(ChatTask).join(Account, ChatTask.account_id == Account.id).filter(ChatTask.id == task_id)
+            if visible_ids is not None:
+                query = query.filter(Account.user_id.in_(visible_ids))
+            task = query.first()
+
             if not task:
                 return response_error('Task not found', 404)
             

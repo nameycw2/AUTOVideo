@@ -1,0 +1,1 @@
+import{s as e}from"./index-BQGw-JZf.js";const o=t=>e.get("/data-center/video-stats",{params:t}),s=t=>e.get("/data-center/account-videos",{params:t}),n=t=>e.post("/data-center/fetch-video-data",t);export{s as a,n as f,o as g};

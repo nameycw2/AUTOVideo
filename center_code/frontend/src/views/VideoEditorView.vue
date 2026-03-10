@@ -760,6 +760,75 @@
             </div>
             </template>
 
+            <!-- ✅ 新增：主标题设置区域 -->
+            <div style="margin-top:16px; padding:16px; background:#fff8e6; border-radius:8px; border:1px solid #ffe58f;">
+              <div style="font-size:12px;font-weight:600;margin-bottom:12px;color:#d48806; display:flex; align-items:center;">
+                <svg style="width:16px;height:16px;margin-right:6px;" viewBox="0 0 24 24" fill="none">
+                  <path d="M4 7h16M4 12h10M4 17h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+                常驻主标题（顶部）
+              </div>
+              
+              <!-- 主标题文本输入 -->
+              <div class="edit-field" style="margin-bottom:12px;">
+                <div class="field-label" style="margin-bottom:6px">标题文本</div>
+                <input 
+                  v-model="editForm.mainTitleText" 
+                  type="text" 
+                  class="form-input" 
+                  placeholder="留空则不显示主标题" 
+                  style="width:100%; padding:8px; border:1px solid #d9d9d9; border-radius:4px;"
+                />
+              </div>
+              
+              <!-- 主标题样式配置（仅当输入了文本时显示）-->
+              <div v-if="editForm.mainTitleText" style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:12px;">
+                <!-- 字号 -->
+                <div class="edit-field">
+                  <div class="field-label" style="margin-bottom:6px">字号</div>
+                  <div class="radio-group" style="flex-direction:column;">
+                    <label class="radio-label" :class="{active: editForm.mainTitleConfig.font_size === '小'}" style="padding:6px 10px; font-size:12px;">
+                      <input type="radio" v-model="editForm.mainTitleConfig.font_size" value="小"> 小
+                    </label>
+                    <label class="radio-label" :class="{active: editForm.mainTitleConfig.font_size === '中'}" style="padding:6px 10px; font-size:12px;">
+                      <input type="radio" v-model="editForm.mainTitleConfig.font_size" value="中"> 中
+                    </label>
+                    <label class="radio-label" :class="{active: editForm.mainTitleConfig.font_size === '大'}" style="padding:6px 10px; font-size:12px;">
+                      <input type="radio" v-model="editForm.mainTitleConfig.font_size" value="大"> 大
+                    </label>
+                  </div>
+                </div>
+                
+                <!-- 字体颜色 -->
+                <div class="edit-field">
+                  <div class="field-label" style="margin-bottom:6px">字体颜色</div>
+                  <div style="display:flex;align-items:center;border:1px solid #d9d9d9;padding:4px;border-radius:4px;background:#fff">
+                    <input 
+                      type="color" 
+                      v-model="editForm.mainTitleConfig.color" 
+                      style="width:24px;height:24px;border:none;padding:0;background:none;cursor:pointer;margin-right:8px;" 
+                    />
+                    <span style="font-size:12px;color:#606266;font-family:monospace">{{ editForm.mainTitleConfig.color }}</span>
+                  </div>
+                </div>
+                
+                <!-- 描边颜色 -->
+                <div class="edit-field">
+                  <div class="field-label" style="margin-bottom:6px">描边颜色</div>
+                  <div style="display:flex;align-items:center;border:1px solid #d9d9d9;padding:4px;border-radius:4px;background:#fff">
+                    <input 
+                      type="color" 
+                      v-model="editForm.mainTitleConfig.stroke_color" 
+                      style="width:24px;height:24px;border:none;padding:0;background:none;cursor:pointer;margin-right:8px;" 
+                    />
+                    <span style="font-size:12px;color:#606266;font-family:monospace">{{ editForm.mainTitleConfig.stroke_color }}</span>
+                  </div>
+                </div>
+              </div>
+              
+              <p style="font-size:11px;color:#8c8c8c;margin:8px 0 0 0;">💡 主标题将在视频顶部居中显示，贯穿整个视频时长</p>
+            </div>
+
             <div class="edit-row" style="margin-top:16px; padding-top:12px; border-top:1px solid #eee;">
                   <button 
                   class="btn btn-primary" 
@@ -1155,6 +1224,14 @@ const editForm = ref({
   // 字幕渲染方式（仅当 subtitleScheme==ims 时）：effect=字幕特效(ASS)，plain=仅SRT
   subtitleRenderMode: 'effect',
 
+  // ✅ 新增：常驻主标题配置
+  mainTitleText: '',
+  mainTitleConfig: {
+    font_size: '中',
+    color: '#FFFFFF',
+    stroke_color: '#000000'
+  },
+
   filter: 'original',
   filterIntensity: 1.0
 })
@@ -1286,7 +1363,10 @@ const handleImsSubmit = async () => {
         subtitleOutlineColor: editForm.value.subtitleOutlineColor,
         subtitleY: editForm.value.subtitleY,
         subtitleAnimation: editForm.value.subtitleAnimation
-      }
+      },
+      // ✅ 新增：主标题参数
+      main_title_text: editForm.value.mainTitleText,
+      main_title_config: editForm.value.mainTitleConfig
     };
 
     console.log("🚀 校验成功，发送 Payload:", payload);
